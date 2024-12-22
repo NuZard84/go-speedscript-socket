@@ -16,6 +16,7 @@ const (
 	StatusCountdown  = "countdown"
 	StatusInProgress = "in_progress"
 	StatusFinished   = "finished"
+	StatusReseting   = "game_reset"
 
 	MinPlayersToStart = 2
 	CountdownDuration = 3 * time.Second
@@ -203,5 +204,138 @@ func (room *Room) AddClient(client *Client) error {
 	log.Printf("Added username: %s to room: %s. Total players: %d",
 		client.Username, room.ID, len(room.Clients))
 
+	go room.broadcastRoomState()
 	return nil
+}
+
+func (rm *RoomManager) RemoveRoom(roomID string) {
+	rm.mutex.Lock()
+	defer rm.mutex.Unlock()
+
+	if _, ok := rm.Rooms[roomID]; !ok {
+		log.Printf("Room not exist !!")
+		return
+	}
+
+	delete(rm.Rooms, roomID)
+	rm.activeRooms--
+	log.Printf("Room removed: %s, Active rooms: %d", roomID, rm.activeRooms)
+
+}
+
+func (room *Room) RemoveClient(client *Client) {
+	room.mutex.Lock()
+	defer room.mutex.Unlock()
+
+	if client == nil {
+		log.Print("Client is nill , not exist now !!")
+		return
+	}
+
+	client.mu.Lock()
+	if client.Conn != nil {
+		client.Conn.Close()
+	}
+	client.mu.Unlock()
+
+	delete(room.Clients, client.Username)
+
+	// Add game state management here
+	if len(room.Clients) < MinPlayersToStart && room.Status != StatusWaiting {
+		room.Status = StatusWaiting
+		room.StartTime = time.Time{} // Reset start time
+
+		// Reset all remaining client stats
+		for _, c := range room.Clients {
+			c.mu.Lock()
+			c.Stats.IsReady = false
+			c.Stats.Progress = 0
+			c.Stats.WPM = 0
+			c.mu.Unlock()
+		}
+
+		// Notify remaining clients about game reset
+		go room.BroadcastMessage(Message{
+			Type: StatusReseting,
+			Data: "Game reset: Not enough players",
+		})
+	}
+
+	if len(room.Clients) == 0 {
+		go roomManager.RemoveRoom(room.ID)
+	}
+
+}
+
+func (room *Room) broadcastRoomState() {
+	room.mutex.RLock()
+	state := struct {
+		Status    string                  `json:"status"`
+		Players   map[string]*PlayerStats `json:"players"`
+		Text      string                  `json:"text,omitempty"`
+		StartTime time.Time               `json:"startTime,omitempty"`
+	}{
+		Status:    room.Status,
+		Players:   make(map[string]*PlayerStats),
+		Text:      room.Text,
+		StartTime: room.StartTime,
+	}
+	room.mutex.RUnlock()
+
+	for username, client := range room.Clients {
+		client.mu.RLock()
+		state.Players[username] = client.Stats
+		client.mu.RUnlock()
+	}
+
+	room.BroadcastMessage(Message{
+		Type: "room_state",
+		Data: state,
+		Time: time.Now(),
+	})
+}
+
+func (room *Room) BroadcastMessage(msg Message) {
+
+	room.mutex.RLock()
+	defer room.mutex.RUnlock()
+
+	var wg sync.WaitGroup
+	errorsChan := make(chan error, len(room.Clients))
+
+	for _, client := range room.Clients {
+		wg.Add(1)
+
+		go func(c *Client) {
+			defer wg.Done()
+			c.mu.Lock()
+			defer c.mu.Unlock()
+
+			if c.Conn == nil {
+				errorsChan <- fmt.Errorf("client connection is nil")
+				return
+			}
+
+			if err := c.Conn.WriteJSON(msg); err != nil {
+				errorsChan <- fmt.Errorf("failed to write message to client: %v", err)
+				go room.RemoveClient(c)
+				return
+			}
+
+		}(client)
+	}
+
+	wg.Wait()
+	close(errorsChan)
+
+	var errList []error
+	for err := range errorsChan {
+		errList = append(errList, err)
+	}
+
+	if len(errList) > 0 {
+		log.Printf("Errors broadcasting message: %v", errList)
+		return
+	}
+
 }
