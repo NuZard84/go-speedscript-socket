@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"math"
@@ -11,7 +12,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/NuZard84/go-socket-speedscript/db"
 	"github.com/gorilla/websocket"
+	"github.com/joho/godotenv"
 )
 
 // Game state and configuration constants
@@ -62,6 +65,7 @@ type Message struct {
 	RoomID   string      `json:"room_id"`
 	Data     interface{} `json:"data"`
 	Time     time.Time   `json:"timestamp"`
+	Text     string      `json:"text"`
 }
 
 // RoomManager handles the creation and management of game rooms
@@ -93,6 +97,18 @@ var (
 	roomManager = NewRoomManager(10)
 )
 
+func setTextFromDb() string {
+
+	ctx := context.Background()
+	sentence, err := db.GetRandomSentence(ctx)
+
+	if err != nil {
+		log.Printf("Error fetching random sentence: %v", err)
+		return "This is a sample text"
+	}
+	return sentence.Story
+}
+
 // NewRoomManager creates a new room manager instance
 func NewRoomManager(maxRooms int) *RoomManager {
 	log.Printf("Creating new room manager with max rooms: %d", maxRooms)
@@ -118,15 +134,28 @@ func NewClient(conn *websocket.Conn, username string) *Client {
 // NewRoom creates a new game room with the given ID
 func NewRoom(id string) *Room {
 	log.Printf("Creating new room: %s", id)
+
+	log.Print("Generating random Text...")
+
+	text := setTextFromDb()
+
 	return &Room{
 		ID:      id,
 		Clients: make(map[string]*Client),
 		Status:  StatusWaiting,
+		Text:    text,
 	}
+
 }
 
 // Initialize logging configuration
 func init() {
+	godotenv.Load()
+
+	if err := db.Connect(os.Getenv("MONGO_URI")); err != nil {
+		log.Fatal("Could not connect to MongoDB:", err)
+	}
+
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds | log.Lshortfile)
 }
 
@@ -426,6 +455,7 @@ func (room *Room) broadcastRoomState() {
 		Data:   state,
 		Time:   time.Now(),
 		RoomID: room.ID,
+		Text:   room.Text,
 	})
 }
 
@@ -560,6 +590,7 @@ func getOrCreateRoom(roomID string) *Room {
 
 	room := NewRoom(roomID)
 	roomManager.Rooms[roomID] = room
+	roomManager.activeRooms++
 	log.Printf("Created new room: %s", roomID)
 	return room
 }
