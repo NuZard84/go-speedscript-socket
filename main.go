@@ -40,11 +40,11 @@ type Client struct {
 
 // PlayerStats tracks individual player performance during the game
 type PlayerStats struct {
-	IsReady    bool       `json:"isReady"`
-	Progress   float64    `json:"progress"`
-	WPM        float64    `json:"wpm"`
-	FinishTime *time.Time `json:"finishTime,omitempty"`
-	Rank       int        `json:"rank"`
+	IsReady         bool       `json:"isReady"`
+	CurrentPosition int        `json:"currentPosition"`
+	WPM             float64    `json:"wpm"`
+	FinishTime      *time.Time `json:"finishTime,omitempty"`
+	Rank            int        `json:"rank"`
 }
 
 // Room represents a game room where multiple players compete
@@ -60,12 +60,13 @@ type Room struct {
 
 // Message defines the structure for WebSocket communication
 type Message struct {
-	Type     string      `json:"type"`
-	Username string      `json:"username"`
-	RoomID   string      `json:"room_id"`
-	Data     interface{} `json:"data"`
-	Time     time.Time   `json:"timestamp"`
-	Text     string      `json:"text"`
+	Type            string      `json:"type"`
+	Username        string      `json:"username"`
+	RoomID          string      `json:"room_id"`
+	Data            interface{} `json:"data"`
+	Time            time.Time   `json:"timestamp"`
+	Text            string      `json:"text"`
+	TotalCharacters int         `json:"totalCharacters,omitempty"`
 }
 
 // RoomManager handles the creation and management of game rooms
@@ -125,8 +126,8 @@ func NewClient(conn *websocket.Conn, username string) *Client {
 		Conn:     conn,
 		Username: username,
 		Stats: &PlayerStats{
-			Progress: 0,
-			WPM:      0,
+			CurrentPosition: 0,
+			WPM:             0,
 		},
 	}
 }
@@ -286,16 +287,20 @@ func handleProgress(room *Room, client *Client, msg Message) {
 		return
 	}
 
+	var totalChars int
 	if progress, ok := msg.Data.(map[string]interface{}); ok {
-		if p, ok := progress["progress"].(float64); ok {
-			client.Stats.Progress = p
+		if pos, ok := progress["currentPosition"].(float64); ok {
+			client.Stats.CurrentPosition = int(pos)
+		}
+		if total, ok := progress["totalCharacters"].(float64); ok {
+			totalChars = int(total)
 		}
 		if w, ok := progress["wpm"].(float64); ok {
 			client.Stats.WPM = w
 		}
 	}
 
-	isFinished := client.Stats.Progress >= 100
+	isFinished := client.Stats.CurrentPosition >= totalChars
 	client.mu.Unlock()
 
 	if isFinished {
@@ -355,16 +360,17 @@ func (room *Room) handleClientFinish(client *Client) {
 		room.mutex.Unlock()
 		return
 	}
+	currentPos := client.Stats.CurrentPosition
 	client.mu.RUnlock()
 
 	now := time.Now()
 
 	client.mu.Lock()
 	client.Stats.FinishTime = &now
-	client.Stats.Progress = 100.0
+	client.Stats.CurrentPosition = currentPos
 	client.Stats.Rank = room.NextRank
 	wpm := client.Stats.WPM
-	log.Printf("user: %s at finish_state in room: %s", client.Username, room.ID)
+	log.Printf("user: %s at finish_state in room: %s with position: %d", client.Username, room.ID, currentPos)
 	client.mu.Unlock()
 
 	room.NextRank++
@@ -373,10 +379,11 @@ func (room *Room) handleClientFinish(client *Client) {
 		Type:   "user_finished",
 		RoomID: room.ID,
 		Data: map[string]interface{}{
-			"rank":     client.Stats.Rank,
-			"wpm":      wpm,
-			"time":     now.Sub(*room.StartTime).Seconds(),
-			"username": client.Username,
+			"rank":          client.Stats.Rank,
+			"wpm":           wpm,
+			"time":          now.Sub(*room.StartTime).Seconds(),
+			"username":      client.Username,
+			"finalPosition": currentPos,
 		},
 	}
 
@@ -421,25 +428,28 @@ func (room *Room) handleGameFinished() {
 // broadcastRoomState sends current room state to all clients
 func (room *Room) broadcastRoomState() {
 	room.mutex.RLock()
+	textLength := len(room.Text)
 	state := struct {
-		Status    string                  `json:"status"`
-		Players   map[string]*PlayerStats `json:"players"`
-		Text      string                  `json:"text,omitempty"`
-		StartTime *time.Time              `json:"startTime,omitempty"`
+		Status          string                  `json:"status"`
+		Players         map[string]*PlayerStats `json:"players"`
+		Text            string                  `json:"text,omitempty"`
+		StartTime       *time.Time              `json:"startTime,omitempty"`
+		TotalCharacters int                     `json:"totalCharacters"`
 	}{
-		Status:    room.Status,
-		Players:   make(map[string]*PlayerStats),
-		Text:      room.Text,
-		StartTime: room.StartTime,
+		Status:          room.Status,
+		Players:         make(map[string]*PlayerStats),
+		Text:            room.Text,
+		StartTime:       room.StartTime,
+		TotalCharacters: textLength,
 	}
 
 	for username, client := range room.Clients {
 		client.mu.RLock()
 		stats := &PlayerStats{
-			IsReady:  client.Stats.IsReady,
-			Progress: math.Round(client.Stats.Progress*100) / 100,
-			WPM:      math.Round(client.Stats.WPM*100) / 100,
-			Rank:     client.Stats.Rank,
+			IsReady:         client.Stats.IsReady,
+			CurrentPosition: client.Stats.CurrentPosition,
+			WPM:             math.Round(client.Stats.WPM*100) / 100,
+			Rank:            client.Stats.Rank,
 		}
 		if client.Stats.FinishTime != nil {
 			finishTime := *client.Stats.FinishTime
@@ -503,7 +513,7 @@ func (room *Room) RemoveClient(client *Client) {
 		for _, c := range room.Clients {
 			c.mu.Lock()
 			c.Stats.IsReady = false
-			c.Stats.Progress = 0
+			c.Stats.CurrentPosition = 0
 			c.Stats.WPM = 0
 			c.mu.Unlock()
 		}
