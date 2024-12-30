@@ -26,6 +26,7 @@ const (
 	StatusReseting   = "game_reset"
 
 	MinPlayersToStart = 2
+	MaxmimumPlayers   = 4
 	CountdownDuration = 3 * time.Second
 )
 
@@ -480,6 +481,10 @@ func (room *Room) AddClient(client *Client) error {
 
 	if _, ok := room.Clients[client.Username]; ok {
 		return fmt.Errorf("this username is already taken")
+	}
+
+	if len(room.Clients) == MaxmimumPlayers {
+		return fmt.Errorf("room is full")
 	}
 
 	room.Clients[client.Username] = client
