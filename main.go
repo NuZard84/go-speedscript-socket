@@ -48,6 +48,12 @@ type PlayerStats struct {
 	Rank            int        `json:"rank"`
 }
 
+type StatisticsData struct {
+	Username  string                   `json:"username"`
+	WPM       float64                  `json:"wpm"`
+	StatsData []map[string]interface{} `json:"state_data"`
+}
+
 // Room represents a game room where multiple players compete
 type Room struct {
 	ID        string
@@ -236,8 +242,57 @@ func handleClientMessage(room *Room, client *Client) {
 			handleProgress(room, client, msg)
 		case "ping":
 			handlePing(client)
+		case "statistics":
+			room.handleGetStatistics(client, msg)
+
 		}
 	}
+}
+
+func (room *Room) handleGetStatistics(client *Client, msg Message) {
+	room.mutex.Lock()
+	defer room.mutex.Unlock()
+
+	// Parse the statistics data from the message
+	statsData, ok := msg.Data.(map[string]interface{})
+	if !ok {
+		log.Printf("Invalid statistics data format")
+		return
+	}
+
+	// Extract and process WPM with 2 decimal places
+	wpm, _ := statsData["wpm"].(float64)
+	roundedWPM := math.Round(wpm*100) / 100
+
+	// Extract state_data array
+	stateData, _ := statsData["state_data"].([]interface{})
+	processedStateData := make([]map[string]interface{}, 0)
+
+	// Process each state data entry
+	for _, data := range stateData {
+		if stateMap, ok := data.(map[string]interface{}); ok {
+			// Round WPM in state data if it exists
+			if wpmVal, exists := stateMap["wpm"].(float64); exists {
+				stateMap["wpm"] = math.Round(wpmVal*100) / 100
+			}
+			processedStateData = append(processedStateData, stateMap)
+		}
+	}
+
+	// Create the statistics entry for this player
+	playerStats := StatisticsData{
+		Username:  client.Username,
+		WPM:       roundedWPM,
+		StatsData: processedStateData,
+	}
+
+	// Broadcast the statistics to all clients
+	room.BroadcastMessage(Message{
+		Type:   "statistics_update",
+		Data:   playerStats,
+		Time:   time.Now(),
+		RoomID: room.ID,
+	})
 }
 
 // handleReadyState processes player ready status updates
@@ -385,6 +440,7 @@ func (room *Room) handleClientFinish(client *Client) {
 			"time":          now.Sub(*room.StartTime).Seconds(),
 			"username":      client.Username,
 			"finalPosition": currentPos,
+			"statistics":    12,
 		},
 	}
 
