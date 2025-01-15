@@ -43,15 +43,10 @@ type Client struct {
 type PlayerStats struct {
 	IsReady         bool       `json:"isReady"`
 	CurrentPosition int        `json:"currentPosition"`
-	WPM             float64    `json:"wpm"`
 	FinishTime      *time.Time `json:"finishTime,omitempty"`
 	Rank            int        `json:"rank"`
-}
-
-type StatisticsData struct {
-	Username  string                   `json:"username"`
-	WPM       float64                  `json:"wpm"`
-	StatsData []map[string]interface{} `json:"state_data"`
+	StatData        []StatData `json:"stat_data,omitempty"`
+	WPM             float64    `json:"wpm,omitempty"`
 }
 
 // Room represents a game room where multiple players compete
@@ -65,6 +60,11 @@ type Room struct {
 	mutex     sync.RWMutex
 }
 
+type StatData struct {
+	Time float64 `json:"time"`
+	WPM  float64 `json:"wpm"`
+}
+
 // Message defines the structure for WebSocket communication
 type Message struct {
 	Type            string      `json:"type"`
@@ -74,6 +74,8 @@ type Message struct {
 	Time            time.Time   `json:"timestamp"`
 	Text            string      `json:"text"`
 	TotalCharacters int         `json:"totalCharacters,omitempty"`
+	StatData        []StatData  `json:"stat_data,omitempty"`
+	WPM             float64     `json:"wpm,omitempty"`
 }
 
 // RoomManager handles the creation and management of game rooms
@@ -83,15 +85,6 @@ type RoomManager struct {
 	maxRooms    int
 	activeRooms int
 }
-
-// RoomConfiguration holds room-specific settings : for now hold for this feature
-// type RoomConfiguration struct {
-// 	MaxPlayers       int
-// 	MinPlayers       int
-// 	CountdownSeconds int
-// 	TextDifficulty   string
-// 	TimeLimit        time.Duration
-// }
 
 // Global variables for WebSocket and room management
 var (
@@ -106,7 +99,6 @@ var (
 )
 
 func setTextFromDb() string {
-
 	ctx := context.Background()
 	sentence, err := db.GetRandomSentence(ctx)
 
@@ -153,7 +145,6 @@ func NewRoom(id string) *Room {
 		Status:  StatusWaiting,
 		Text:    text,
 	}
-
 }
 
 // Initialize logging configuration
@@ -240,58 +231,48 @@ func handleClientMessage(room *Room, client *Client) {
 			handleReadyState(room, client, msg)
 		case "progress":
 			handleProgress(room, client, msg)
+		case "final_stats":
+			handleFinalStats(room, client, msg)
 		case "ping":
 			handlePing(client)
-		case "statistics":
-			room.handleGetStatistics(client, msg)
-
 		}
 	}
 }
 
-func (room *Room) handleGetStatistics(client *Client, msg Message) {
+func handleFinalStats(room *Room, client *Client, msg Message) {
 	room.mutex.Lock()
 	defer room.mutex.Unlock()
 
-	// Parse the statistics data from the message
-	statsData, ok := msg.Data.(map[string]interface{})
-	if !ok {
-		log.Printf("Invalid statistics data format")
-		return
-	}
+	// Log received data
+	log.Printf("Received final stats from %s: WPM=%v, StatData=%v",
+		client.Username, msg.WPM, msg.StatData)
 
-	// Extract and process WPM with 2 decimal places
-	wpm, _ := statsData["wpm"].(float64)
-	roundedWPM := math.Round(wpm*100) / 100
-
-	// Extract state_data array
-	stateData, _ := statsData["state_data"].([]interface{})
-	processedStateData := make([]map[string]interface{}, 0)
-
-	// Process each state data entry
-	for _, data := range stateData {
-		if stateMap, ok := data.(map[string]interface{}); ok {
-			// Round WPM in state data if it exists
-			if wpmVal, exists := stateMap["wpm"].(float64); exists {
-				stateMap["wpm"] = math.Round(wpmVal*100) / 100
+	client.mu.Lock()
+	if data, ok := msg.Data.(map[string]interface{}); ok {
+		if wpm, ok := data["wpm"].(float64); ok {
+			client.Stats.WPM = wpm
+		}
+		if statData, ok := data["stat_data"].([]interface{}); ok {
+			client.Stats.StatData = make([]StatData, len(statData))
+			for i, stat := range statData {
+				if statMap, ok := stat.(map[string]interface{}); ok {
+					client.Stats.StatData[i] = StatData{
+						Time: statMap["time"].(float64),
+						WPM:  statMap["wpm"].(float64),
+					}
+				}
 			}
-			processedStateData = append(processedStateData, stateMap)
 		}
 	}
+	client.mu.Unlock()
 
-	// Create the statistics entry for this player
-	playerStats := StatisticsData{
-		Username:  client.Username,
-		WPM:       roundedWPM,
-		StatsData: processedStateData,
-	}
-
-	// Broadcast the statistics to all clients
 	room.BroadcastMessage(Message{
-		Type:   "statistics_update",
-		Data:   playerStats,
-		Time:   time.Now(),
-		RoomID: room.ID,
+		Type: "ws_final_stats",
+		Data: map[string]interface{}{
+			"username":  client.Username,
+			"wpm":       client.Stats.WPM,
+			"stat_data": client.Stats.StatData,
+		},
 	})
 }
 
@@ -440,7 +421,6 @@ func (room *Room) handleClientFinish(client *Client) {
 			"time":          now.Sub(*room.StartTime).Seconds(),
 			"username":      client.Username,
 			"finalPosition": currentPos,
-			"statistics":    12,
 		},
 	}
 
@@ -468,9 +448,31 @@ func (room *Room) handleClientFinish(client *Client) {
 	}
 }
 
-// handleGameFinished processes the end of a game
+// handleGameFinished processes the end of a game and broadcasts final statistics
 func (room *Room) handleGameFinished() {
 	log.Printf("Game has finished in room %s", room.ID)
+	room.broadcastRoomState()
+
+	// Collect final statistics for all players
+	finalStats := make(map[string]interface{})
+	for username, client := range room.Clients {
+		client.mu.RLock()
+		stats := map[string]interface{}{
+			"username":  username,
+			"wpm":       client.Stats.WPM,
+			"rank":      client.Stats.Rank,
+			"stat_data": client.Stats.StatData,
+		}
+		finalStats[username] = stats
+		client.mu.RUnlock()
+	}
+
+	// Broadcast final statistics to all clients
+	room.BroadcastMessage(Message{
+		Type: "ws_final_stats",
+		Data: finalStats,
+	})
+
 	room.BroadcastMessage(Message{
 		Type: "game_finished",
 		Data: map[string]interface{}{
@@ -478,8 +480,6 @@ func (room *Room) handleGameFinished() {
 			"status":  StatusFinished,
 		},
 	})
-
-	room.broadcastRoomState()
 }
 
 // broadcastRoomState sends current room state to all clients
