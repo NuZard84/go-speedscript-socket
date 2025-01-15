@@ -48,6 +48,25 @@ type PlayerStats struct {
 	Rank            int        `json:"rank"`
 }
 
+type PlayerTimeStats struct {
+	Time float64 `json:"time"`
+	WPM  float64 `json:"wpm"`
+}
+
+type FinalPlayerStats struct {
+	Username   string            `json:"username"`
+	Stats      []PlayerTimeStats `json:"stats"`
+	FinalWPM   float64           `json:"wpm"`
+	Rank       int               `json:"rank"`
+	FinishTime float64           `json:"finishTime"`
+	RoomID     string            `json:"roomId"`
+}
+
+type FinalGameStats struct {
+	Players []FinalPlayerStats `json:"players"`
+	RoomID  string             `json:"roomId"`
+}
+
 // Room represents a game room where multiple players compete
 type Room struct {
 	ID        string
@@ -236,8 +255,72 @@ func handleClientMessage(room *Room, client *Client) {
 			handleProgress(room, client, msg)
 		case "ping":
 			handlePing(client)
+		case "final_stats":
+			room.handleFinalStats(client, msg)
 		}
 	}
+}
+
+func (room *Room) handleFinalStats(client *Client, msg Message) {
+	room.mutex.Lock()
+	defer room.mutex.Unlock()
+
+	if room.Status != StatusFinished {
+		return
+	}
+
+	var playerStats FinalPlayerStats
+	if data, ok := msg.Data.(map[string]interface{}); ok {
+		// Parse the incoming stats
+		if stats, ok := data["stats"].(map[string]interface{}); ok {
+			if timeStats, ok := stats["timeStats"].([]interface{}); ok {
+				for _, stat := range timeStats {
+					if statMap, ok := stat.(map[string]interface{}); ok {
+						playerStats.Stats = append(playerStats.Stats, PlayerTimeStats{
+							Time: statMap["time"].(float64),
+							WPM:  statMap["wpm"].(float64),
+						})
+					}
+				}
+			}
+			if wpm, ok := stats["wpm"].(float64); ok {
+				playerStats.FinalWPM = wpm
+			}
+		}
+		playerStats.Username = client.Username
+		playerStats.Rank = client.Stats.Rank
+		playerStats.RoomID = room.ID
+
+		if client.Stats.FinishTime != nil {
+			playerStats.FinishTime = client.Stats.FinishTime.Sub(*room.StartTime).Seconds()
+		}
+	}
+
+	// Collect all players' stats and broadcast
+	var allStats FinalGameStats
+	allStats.RoomID = room.ID
+
+	for _, c := range room.Clients {
+		c.mu.RLock()
+		if c.Stats.FinishTime != nil {
+			playerStat := FinalPlayerStats{
+				Username:   c.Username,
+				FinalWPM:   c.Stats.WPM,
+				Rank:       c.Stats.Rank,
+				FinishTime: c.Stats.FinishTime.Sub(*room.StartTime).Seconds(),
+				RoomID:     room.ID,
+			}
+			allStats.Players = append(allStats.Players, playerStat)
+		}
+		c.mu.RUnlock()
+	}
+
+	// Broadcast final stats to all clients
+	room.BroadcastMessage(Message{
+		Type: "ws_final_stats",
+		Data: allStats,
+		Time: time.Now(),
+	})
 }
 
 // handleReadyState processes player ready status updates
