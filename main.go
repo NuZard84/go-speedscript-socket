@@ -25,6 +25,7 @@ const (
 	StatusFinished   = "finished"
 	StatusReseting   = "game_reset"
 
+	TimeoutTime       = 10 * time.Second
 	MinPlayersToStart = 2
 	MaxmimumPlayers   = 4
 	CountdownDuration = 3 * time.Second
@@ -427,6 +428,51 @@ func (room *Room) startGame() {
 	room.mutex.Unlock()
 
 	room.broadcastRoomState()
+
+	// Start timeout timer
+	go func() {
+		time.Sleep(TimeoutTime)
+		room.mutex.Lock()
+		if room.Status == StatusInProgress {
+			room.handleTimeout()
+		}
+		room.mutex.Unlock()
+	}()
+}
+
+func (room *Room) handleTimeout() {
+	if room.Status != StatusInProgress {
+		return
+	}
+
+	log.Printf("Game timeout in room %s", room.ID)
+
+	// Mark unfinished players
+	for _, client := range room.Clients {
+		client.mu.Lock()
+		if client.Stats.FinishTime == nil {
+			now := time.Now()
+			client.Stats.FinishTime = &now
+			client.Stats.Rank = room.NextRank
+			room.NextRank++
+		}
+		client.mu.Unlock()
+	}
+
+	room.Status = StatusFinished
+
+	// Broadcast timeout message
+	timeoutMsg := Message{
+		Type: "game_timeout",
+		Data: map[string]interface{}{
+			"message": "Game time limit reached",
+			"status":  StatusFinished,
+		},
+	}
+	room.BroadcastMessage(timeoutMsg)
+
+	// Handle game finished state
+	room.handleGameFinished()
 }
 
 // handleClientFinish processes a player finishing the game
@@ -438,6 +484,13 @@ func (room *Room) handleClientFinish(client *Client) {
 		return
 	}
 
+	// Check if we're past the timeout
+	if time.Since(*room.StartTime) >= TimeoutTime {
+		room.mutex.Unlock()
+		return
+	}
+
+	// Rest of the existing handleClientFinish code...
 	client.mu.RLock()
 	if client.Stats.FinishTime != nil {
 		client.mu.RUnlock()
@@ -498,11 +551,19 @@ func (room *Room) handleClientFinish(client *Client) {
 // handleGameFinished processes the end of a game
 func (room *Room) handleGameFinished() {
 	log.Printf("Game has finished in room %s", room.ID)
+
+	// Determine if game ended due to timeout
+	isTimeout := false
+	if room.StartTime != nil {
+		isTimeout = time.Since(*room.StartTime) >= TimeoutTime
+	}
+
 	room.BroadcastMessage(Message{
 		Type: "game_finished",
 		Data: map[string]interface{}{
-			"message": "Game has finished",
-			"status":  StatusFinished,
+			"message":   "Game has finished",
+			"status":    StatusFinished,
+			"isTimeout": isTimeout,
 		},
 	})
 
