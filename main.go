@@ -531,22 +531,28 @@ func (room *Room) AddClient(client *Client) error {
 	room.mutex.Lock()
 	defer room.mutex.Unlock()
 
+	// Check if the room is in a valid state to add a new client
 	if room.Status != StatusWaiting {
 		return fmt.Errorf("this room is already in busy state")
 	}
 
+	// Check if the username is already taken
 	if _, ok := room.Clients[client.Username]; ok {
 		return fmt.Errorf("this username is already taken")
 	}
 
-	if len(room.Clients) == MaxmimumPlayers {
+	// Check if the room is full
+	if len(room.Clients) >= MaxmimumPlayers {
 		return fmt.Errorf("room is full")
 	}
 
+	// Add the client to the room
 	room.Clients[client.Username] = client
 	client.Room = room
 
+	// Broadcast the updated room state to all clients
 	go room.broadcastRoomState()
+
 	return nil
 }
 
@@ -559,18 +565,22 @@ func (room *Room) RemoveClient(client *Client) {
 		return
 	}
 
+	// Close the client's WebSocket connection
 	client.mu.Lock()
 	if client.Conn != nil {
 		client.Conn.Close()
 	}
 	client.mu.Unlock()
 
+	// Remove the client from the room
 	delete(room.Clients, client.Username)
 
+	// Reset the room state if there are not enough players
 	if len(room.Clients) < MinPlayersToStart && room.Status != StatusWaiting {
 		room.Status = StatusWaiting
 		room.StartTime = nil
 
+		// Reset all players' stats
 		for _, c := range room.Clients {
 			c.mu.Lock()
 			c.Stats.IsReady = false
@@ -579,12 +589,14 @@ func (room *Room) RemoveClient(client *Client) {
 			c.mu.Unlock()
 		}
 
+		// Broadcast the reset message
 		go room.BroadcastMessage(Message{
 			Type: StatusReseting,
 			Data: "Game reset: Not enough players",
 		})
 	}
 
+	// Remove the room if there are no players left
 	if len(room.Clients) == 0 {
 		go roomManager.RemoveRoom(room.ID)
 	}
@@ -655,7 +667,7 @@ func getOrCreateRoom(roomID string) *Room {
 	defer roomManager.mutex.Unlock()
 
 	if room, ok := roomManager.Rooms[roomID]; ok {
-		log.Printf("Room already exists: %s", roomID)
+		log.Printf("Room already exists: %s (Status: %s)", roomID, room.Status)
 		return room
 	}
 
