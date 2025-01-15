@@ -43,10 +43,9 @@ type Client struct {
 type PlayerStats struct {
 	IsReady         bool       `json:"isReady"`
 	CurrentPosition int        `json:"currentPosition"`
+	WPM             float64    `json:"wpm"`
 	FinishTime      *time.Time `json:"finishTime,omitempty"`
 	Rank            int        `json:"rank"`
-	StatData        []StatData `json:"stat_data,omitempty"`
-	WPM             float64    `json:"wpm,omitempty"`
 }
 
 // Room represents a game room where multiple players compete
@@ -60,11 +59,6 @@ type Room struct {
 	mutex     sync.RWMutex
 }
 
-type StatData struct {
-	Time float64 `json:"time"`
-	WPM  float64 `json:"wpm"`
-}
-
 // Message defines the structure for WebSocket communication
 type Message struct {
 	Type            string      `json:"type"`
@@ -74,8 +68,6 @@ type Message struct {
 	Time            time.Time   `json:"timestamp"`
 	Text            string      `json:"text"`
 	TotalCharacters int         `json:"totalCharacters,omitempty"`
-	StatData        []StatData  `json:"stat_data,omitempty"`
-	WPM             float64     `json:"wpm,omitempty"`
 }
 
 // RoomManager handles the creation and management of game rooms
@@ -85,6 +77,15 @@ type RoomManager struct {
 	maxRooms    int
 	activeRooms int
 }
+
+// RoomConfiguration holds room-specific settings : for now hold for this feature
+// type RoomConfiguration struct {
+// 	MaxPlayers       int
+// 	MinPlayers       int
+// 	CountdownSeconds int
+// 	TextDifficulty   string
+// 	TimeLimit        time.Duration
+// }
 
 // Global variables for WebSocket and room management
 var (
@@ -99,6 +100,7 @@ var (
 )
 
 func setTextFromDb() string {
+
 	ctx := context.Background()
 	sentence, err := db.GetRandomSentence(ctx)
 
@@ -145,6 +147,7 @@ func NewRoom(id string) *Room {
 		Status:  StatusWaiting,
 		Text:    text,
 	}
+
 }
 
 // Initialize logging configuration
@@ -231,49 +234,10 @@ func handleClientMessage(room *Room, client *Client) {
 			handleReadyState(room, client, msg)
 		case "progress":
 			handleProgress(room, client, msg)
-		case "final_stats":
-			handleFinalStats(room, client, msg)
 		case "ping":
 			handlePing(client)
 		}
 	}
-}
-
-func handleFinalStats(room *Room, client *Client, msg Message) {
-	room.mutex.Lock()
-	defer room.mutex.Unlock()
-
-	// Log received data
-	log.Printf("Received final stats from %s: WPM=%v, StatData=%v",
-		client.Username, msg.WPM, msg.StatData)
-
-	client.mu.Lock()
-	if data, ok := msg.Data.(map[string]interface{}); ok {
-		if wpm, ok := data["wpm"].(float64); ok {
-			client.Stats.WPM = wpm
-		}
-		if statData, ok := data["stat_data"].([]interface{}); ok {
-			client.Stats.StatData = make([]StatData, len(statData))
-			for i, stat := range statData {
-				if statMap, ok := stat.(map[string]interface{}); ok {
-					client.Stats.StatData[i] = StatData{
-						Time: statMap["time"].(float64),
-						WPM:  statMap["wpm"].(float64),
-					}
-				}
-			}
-		}
-	}
-	client.mu.Unlock()
-
-	room.BroadcastMessage(Message{
-		Type: "ws_final_stats",
-		Data: map[string]interface{}{
-			"username":  client.Username,
-			"wpm":       client.Stats.WPM,
-			"stat_data": client.Stats.StatData,
-		},
-	})
 }
 
 // handleReadyState processes player ready status updates
@@ -448,31 +412,9 @@ func (room *Room) handleClientFinish(client *Client) {
 	}
 }
 
-// handleGameFinished processes the end of a game and broadcasts final statistics
+// handleGameFinished processes the end of a game
 func (room *Room) handleGameFinished() {
 	log.Printf("Game has finished in room %s", room.ID)
-	room.broadcastRoomState()
-
-	// Collect final statistics for all players
-	finalStats := make(map[string]interface{})
-	for username, client := range room.Clients {
-		client.mu.RLock()
-		stats := map[string]interface{}{
-			"username":  username,
-			"wpm":       client.Stats.WPM,
-			"rank":      client.Stats.Rank,
-			"stat_data": client.Stats.StatData,
-		}
-		finalStats[username] = stats
-		client.mu.RUnlock()
-	}
-
-	// Broadcast final statistics to all clients
-	room.BroadcastMessage(Message{
-		Type: "ws_final_stats",
-		Data: finalStats,
-	})
-
 	room.BroadcastMessage(Message{
 		Type: "game_finished",
 		Data: map[string]interface{}{
@@ -480,6 +422,8 @@ func (room *Room) handleGameFinished() {
 			"status":  StatusFinished,
 		},
 	})
+
+	room.broadcastRoomState()
 }
 
 // broadcastRoomState sends current room state to all clients
@@ -531,28 +475,22 @@ func (room *Room) AddClient(client *Client) error {
 	room.mutex.Lock()
 	defer room.mutex.Unlock()
 
-	// Check if the room is in a valid state to add a new client
 	if room.Status != StatusWaiting {
 		return fmt.Errorf("this room is already in busy state")
 	}
 
-	// Check if the username is already taken
 	if _, ok := room.Clients[client.Username]; ok {
 		return fmt.Errorf("this username is already taken")
 	}
 
-	// Check if the room is full
-	if len(room.Clients) >= MaxmimumPlayers {
+	if len(room.Clients) == MaxmimumPlayers {
 		return fmt.Errorf("room is full")
 	}
 
-	// Add the client to the room
 	room.Clients[client.Username] = client
 	client.Room = room
 
-	// Broadcast the updated room state to all clients
 	go room.broadcastRoomState()
-
 	return nil
 }
 
@@ -565,22 +503,18 @@ func (room *Room) RemoveClient(client *Client) {
 		return
 	}
 
-	// Close the client's WebSocket connection
 	client.mu.Lock()
 	if client.Conn != nil {
 		client.Conn.Close()
 	}
 	client.mu.Unlock()
 
-	// Remove the client from the room
 	delete(room.Clients, client.Username)
 
-	// Reset the room state if there are not enough players
 	if len(room.Clients) < MinPlayersToStart && room.Status != StatusWaiting {
 		room.Status = StatusWaiting
 		room.StartTime = nil
 
-		// Reset all players' stats
 		for _, c := range room.Clients {
 			c.mu.Lock()
 			c.Stats.IsReady = false
@@ -589,14 +523,12 @@ func (room *Room) RemoveClient(client *Client) {
 			c.mu.Unlock()
 		}
 
-		// Broadcast the reset message
 		go room.BroadcastMessage(Message{
 			Type: StatusReseting,
 			Data: "Game reset: Not enough players",
 		})
 	}
 
-	// Remove the room if there are no players left
 	if len(room.Clients) == 0 {
 		go roomManager.RemoveRoom(room.ID)
 	}
@@ -667,7 +599,7 @@ func getOrCreateRoom(roomID string) *Room {
 	defer roomManager.mutex.Unlock()
 
 	if room, ok := roomManager.Rooms[roomID]; ok {
-		log.Printf("Room already exists: %s (Status: %s)", roomID, room.Status)
+		log.Printf("Room already exists: %s", roomID)
 		return room
 	}
 
