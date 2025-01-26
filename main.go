@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -25,7 +26,6 @@ const (
 	StatusFinished   = "finished"
 	StatusReseting   = "game_reset"
 
-	TimeoutTime       = 10 * time.Second
 	MinPlayersToStart = 2
 	MaxmimumPlayers   = 4
 	CountdownDuration = 3 * time.Second
@@ -38,6 +38,7 @@ type Client struct {
 	Room     *Room
 	Stats    *PlayerStats
 	mu       sync.RWMutex
+	writeMu  sync.Mutex
 }
 
 // PlayerStats tracks individual player performance during the game
@@ -68,6 +69,11 @@ type FinalGameStats struct {
 	RoomID  string             `json:"roomId"`
 }
 
+type FinalStatsMessage struct {
+	Username string
+	Stats    map[string]interface{}
+}
+
 // Room represents a game room where multiple players compete
 type Room struct {
 	ID        string
@@ -77,6 +83,7 @@ type Room struct {
 	StartTime *time.Time
 	NextRank  int
 	mutex     sync.RWMutex
+	StatsChan chan FinalStatsMessage
 }
 
 // Message defines the structure for WebSocket communication
@@ -97,15 +104,6 @@ type RoomManager struct {
 	maxRooms    int
 	activeRooms int
 }
-
-// RoomConfiguration holds room-specific settings : for now hold for this feature
-// type RoomConfiguration struct {
-// 	MaxPlayers       int
-// 	MinPlayers       int
-// 	CountdownSeconds int
-// 	TextDifficulty   string
-// 	TimeLimit        time.Duration
-// }
 
 // Global variables for WebSocket and room management
 var (
@@ -156,18 +154,15 @@ func NewClient(conn *websocket.Conn, username string) *Client {
 // NewRoom creates a new game room with the given ID
 func NewRoom(id string) *Room {
 	log.Printf("Creating new room: %s", id)
-
-	log.Print("Generating random Text...")
-
 	text := setTextFromDb()
 
 	return &Room{
-		ID:      id,
-		Clients: make(map[string]*Client),
-		Status:  StatusWaiting,
-		Text:    text,
+		ID:        id,
+		Clients:   make(map[string]*Client),
+		Status:    StatusWaiting,
+		Text:      text,
+		StatsChan: make(chan FinalStatsMessage, MaxmimumPlayers), // Initialize the channel
 	}
-
 }
 
 // Initialize logging configuration
@@ -257,7 +252,10 @@ func handleClientMessage(room *Room, client *Client) {
 		case "ping":
 			handlePing(client)
 		case "final_stats":
+			log.Printf("Received final_stats message: %+v", msg)
 			room.handleFinalStats(client, msg)
+		case "timeout":
+			room.handleTimeout()
 		}
 	}
 }
@@ -266,72 +264,97 @@ func (room *Room) handleFinalStats(client *Client, msg Message) {
 	room.mutex.Lock()
 	defer room.mutex.Unlock()
 
+	log.Printf("Processing final stats for client: %s", client.Username)
+
 	if room.Status != StatusFinished {
+		log.Printf("Game not finished, stats not accepted")
 		return
 	}
 
-	var playerStats FinalPlayerStats
 	if data, ok := msg.Data.(map[string]interface{}); ok {
-		// Parse the incoming stats
-		if stats, ok := data["stats"].(map[string]interface{}); ok {
-			if timeStats, ok := stats["timeStats"].([]interface{}); ok {
-				for _, stat := range timeStats {
-					if statMap, ok := stat.(map[string]interface{}); ok {
-						playerStats.Stats = append(playerStats.Stats, PlayerTimeStats{
-							Time: statMap["time"].(float64),
-							WPM:  statMap["wpm"].(float64),
-						})
-					}
-				}
-			}
-			if wpm, ok := stats["wpm"].(float64); ok {
-				playerStats.FinalWPM = wpm
-			}
-		}
-		playerStats.Username = client.Username
-		playerStats.Rank = client.Stats.Rank
-		playerStats.RoomID = room.ID
-
-		if client.Stats.FinishTime != nil {
-			playerStats.FinishTime = client.Stats.FinishTime.Sub(*room.StartTime).Seconds()
+		room.StatsChan <- FinalStatsMessage{
+			Username: client.Username,
+			Stats:    data,
 		}
 	}
+}
 
-	// Collect all players' stats and broadcast
+func (room *Room) mergeAndBroadcastStats() {
 	var allStats FinalGameStats
 	allStats.RoomID = room.ID
 
-	for _, c := range room.Clients {
-		c.mu.RLock()
-		if c.Stats.FinishTime != nil {
-			playerStat := FinalPlayerStats{
-				Username:   c.Username,
-				FinalWPM:   c.Stats.WPM,
-				Rank:       c.Stats.Rank,
-				FinishTime: c.Stats.FinishTime.Sub(*room.StartTime).Seconds(),
-				RoomID:     room.ID,
+	// Create a map to store stats for each player
+	playerStatsMap := make(map[string]FinalPlayerStats)
+
+	// Wait for all clients to send their stats with a timeout
+	timeout := time.After(10 * time.Second) // 10-second timeout
+	for i := 0; i < len(room.Clients); i++ {
+		select {
+		case statsMsg := <-room.StatsChan:
+			// Process stats
+			if stats, ok := statsMsg.Stats["stats"].(map[string]interface{}); ok {
+				playerStat := FinalPlayerStats{
+					Username: statsMsg.Username,
+					RoomID:   room.ID,
+				}
+
+				// Extract WPM and timeStats
+				if wpm, ok := stats["wpm"].(string); ok {
+					finalWPM, _ := strconv.ParseFloat(wpm, 64)
+					playerStat.FinalWPM = finalWPM
+				}
+
+				if timeStats, ok := stats["timeStats"].([]interface{}); ok {
+					for _, stat := range timeStats {
+						if statMap, ok := stat.(map[string]interface{}); ok {
+							playerStat.Stats = append(playerStat.Stats, PlayerTimeStats{
+								Time: statMap["time"].(float64),
+								WPM:  statMap["wpm"].(float64),
+							})
+						}
+					}
+				}
+
+				playerStatsMap[statsMsg.Username] = playerStat
 			}
-			allStats.Players = append(allStats.Players, playerStat)
+		case <-timeout:
+			log.Printf("Timeout waiting for stats from clients")
+			return
 		}
-		c.mu.RUnlock()
 	}
 
-	// Broadcast final stats to all clients
-	room.BroadcastMessage(Message{
-		Type: "ws_final_stats",
-		Data: allStats,
+	// Merge and broadcast stats
+	room.mutex.RLock()
+	defer room.mutex.RUnlock()
+
+	for _, client := range room.Clients {
+		client.mu.RLock()
+		if stats, ok := playerStatsMap[client.Username]; ok {
+			stats.Rank = client.Stats.Rank
+			stats.FinishTime = client.Stats.FinishTime.Sub(*room.StartTime).Seconds()
+			allStats.Players = append(allStats.Players, stats)
+		}
+		client.mu.RUnlock()
+	}
+
+	broadcastMsg := Message{
+		Type: "ws_final_stat",
+		Data: map[string]interface{}{
+			"players": allStats.Players,
+			"roomId":  allStats.RoomID,
+		},
 		Time: time.Now(),
-	})
+	}
+
+	room.BroadcastMessage(broadcastMsg)
+	log.Printf("Final stats broadcast completed successfully")
 }
 
 // handleReadyState processes player ready status updates
 func handleReadyState(room *Room, client *Client, msg Message) {
-	room.mutex.Lock()
-	defer room.mutex.Unlock()
-
 	readyState, ok := msg.Data.(bool)
 	if !ok {
-		log.Printf("Invalid data type for ready state: %v", msg.Data)
+		log.Printf("Invalid ready state: %v", msg.Data)
 		return
 	}
 
@@ -339,22 +362,31 @@ func handleReadyState(room *Room, client *Client, msg Message) {
 	client.Stats.IsReady = readyState
 	client.mu.Unlock()
 
-	allReady := true
-	clientCount := 0
-	for _, c := range room.Clients {
-		c.mu.RLock()
-		if !c.Stats.IsReady {
-			allReady = false
-		}
-		clientCount++
-		c.mu.RUnlock()
-	}
-
-	if allReady && clientCount >= MinPlayersToStart && room.Status == StatusWaiting {
+	if room.validateAllPlayersReady() {
 		go room.startGame()
 	}
 
 	go room.broadcastRoomState()
+}
+
+func (room *Room) validateAllPlayersReady() bool {
+	room.mutex.RLock()
+	defer room.mutex.RUnlock()
+
+	if len(room.Clients) < MinPlayersToStart {
+		return false
+	}
+
+	for _, client := range room.Clients {
+		client.mu.RLock()
+		if !client.Stats.IsReady {
+			client.mu.RUnlock()
+			return false
+		}
+		client.mu.RUnlock()
+	}
+
+	return true
 }
 
 // handleProgress updates player progress during the game
@@ -428,51 +460,6 @@ func (room *Room) startGame() {
 	room.mutex.Unlock()
 
 	room.broadcastRoomState()
-
-	// Start timeout timer
-	go func() {
-		time.Sleep(TimeoutTime)
-		room.mutex.Lock()
-		if room.Status == StatusInProgress {
-			room.handleTimeout()
-		}
-		room.mutex.Unlock()
-	}()
-}
-
-func (room *Room) handleTimeout() {
-	if room.Status != StatusInProgress {
-		return
-	}
-
-	log.Printf("Game timeout in room %s", room.ID)
-
-	// Mark unfinished players
-	for _, client := range room.Clients {
-		client.mu.Lock()
-		if client.Stats.FinishTime == nil {
-			now := time.Now()
-			client.Stats.FinishTime = &now
-			client.Stats.Rank = room.NextRank
-			room.NextRank++
-		}
-		client.mu.Unlock()
-	}
-
-	room.Status = StatusFinished
-
-	// Broadcast timeout message
-	timeoutMsg := Message{
-		Type: "game_timeout",
-		Data: map[string]interface{}{
-			"message": "Game time limit reached",
-			"status":  StatusFinished,
-		},
-	}
-	room.BroadcastMessage(timeoutMsg)
-
-	// Handle game finished state
-	room.handleGameFinished()
 }
 
 // handleClientFinish processes a player finishing the game
@@ -484,13 +471,6 @@ func (room *Room) handleClientFinish(client *Client) {
 		return
 	}
 
-	// Check if we're past the timeout
-	if time.Since(*room.StartTime) >= TimeoutTime {
-		room.mutex.Unlock()
-		return
-	}
-
-	// Rest of the existing handleClientFinish code...
 	client.mu.RLock()
 	if client.Stats.FinishTime != nil {
 		client.mu.RUnlock()
@@ -552,66 +532,18 @@ func (room *Room) handleClientFinish(client *Client) {
 func (room *Room) handleGameFinished() {
 	log.Printf("Game has finished in room %s", room.ID)
 
-	// Determine if game ended due to timeout
-	isTimeout := false
-	if room.StartTime != nil {
-		isTimeout = time.Since(*room.StartTime) >= TimeoutTime
-	}
+	// Start the goroutine to merge and broadcast stats
+	go room.mergeAndBroadcastStats()
 
 	room.BroadcastMessage(Message{
 		Type: "game_finished",
 		Data: map[string]interface{}{
-			"message":   "Game has finished",
-			"status":    StatusFinished,
-			"isTimeout": isTimeout,
+			"message": "Game has finished",
+			"status":  StatusFinished,
 		},
 	})
 
 	room.broadcastRoomState()
-}
-
-// broadcastRoomState sends current room state to all clients
-func (room *Room) broadcastRoomState() {
-	room.mutex.RLock()
-	textLength := len(room.Text)
-	state := struct {
-		Status          string                  `json:"status"`
-		Players         map[string]*PlayerStats `json:"players"`
-		Text            string                  `json:"text,omitempty"`
-		StartTime       *time.Time              `json:"startTime,omitempty"`
-		TotalCharacters int                     `json:"totalCharacters"`
-	}{
-		Status:          room.Status,
-		Players:         make(map[string]*PlayerStats),
-		Text:            room.Text,
-		StartTime:       room.StartTime,
-		TotalCharacters: textLength,
-	}
-
-	for username, client := range room.Clients {
-		client.mu.RLock()
-		stats := &PlayerStats{
-			IsReady:         client.Stats.IsReady,
-			CurrentPosition: client.Stats.CurrentPosition,
-			WPM:             math.Round(client.Stats.WPM*100) / 100,
-			Rank:            client.Stats.Rank,
-		}
-		if client.Stats.FinishTime != nil {
-			finishTime := *client.Stats.FinishTime
-			stats.FinishTime = &finishTime
-		}
-		state.Players[username] = stats
-		client.mu.RUnlock()
-	}
-	room.mutex.RUnlock()
-
-	room.BroadcastMessage(Message{
-		Type:   "room_state",
-		Data:   state,
-		Time:   time.Now(),
-		RoomID: room.ID,
-		Text:   room.Text,
-	})
 }
 
 // AddClient adds a new client to the room
@@ -678,39 +610,104 @@ func (room *Room) RemoveClient(client *Client) {
 	}
 }
 
+// broadcastRoomState sends current room state to all clients
+func (room *Room) broadcastRoomState() {
+	room.mutex.RLock()
+	textLength := len(room.Text)
+	state := struct {
+		Status          string                  `json:"status"`
+		Players         map[string]*PlayerStats `json:"players"`
+		Text            string                  `json:"text,omitempty"`
+		StartTime       *time.Time              `json:"startTime,omitempty"`
+		TotalCharacters int                     `json:"totalCharacters"`
+	}{
+		Status:          room.Status,
+		Players:         make(map[string]*PlayerStats),
+		Text:            room.Text,
+		StartTime:       room.StartTime,
+		TotalCharacters: textLength,
+	}
+
+	for username, client := range room.Clients {
+		client.mu.RLock()
+		stats := &PlayerStats{
+			IsReady:         client.Stats.IsReady,
+			CurrentPosition: client.Stats.CurrentPosition,
+			WPM:             math.Round(client.Stats.WPM*100) / 100,
+			Rank:            client.Stats.Rank,
+		}
+		if client.Stats.FinishTime != nil {
+			finishTime := *client.Stats.FinishTime
+			stats.FinishTime = &finishTime
+		}
+		state.Players[username] = stats
+		client.mu.RUnlock()
+	}
+	room.mutex.RUnlock()
+
+	room.BroadcastMessage(Message{
+		Type:   "room_state",
+		Data:   state,
+		Time:   time.Now(),
+		RoomID: room.ID,
+		Text:   room.Text,
+	})
+}
+
 // BroadcastMessage sends a message to all clients in the room
 func (room *Room) BroadcastMessage(msg Message) {
 	room.mutex.RLock()
 	defer room.mutex.RUnlock()
 
+	log.Printf("Starting broadcast - Message Type: %s, Room ID: %s, Clients: %d", msg.Type, room.ID, len(room.Clients))
+
 	var wg sync.WaitGroup
 	errorsChan := make(chan error, len(room.Clients))
 
-	for _, client := range room.Clients {
+	for username, client := range room.Clients {
 		wg.Add(1)
-
-		go func(c *Client) {
+		go func(c *Client, name string) {
 			defer wg.Done()
-			c.mu.Lock()
-			defer c.mu.Unlock()
+
+			c.writeMu.Lock()
+			defer c.writeMu.Unlock()
 
 			if c.Conn == nil {
-				errorsChan <- fmt.Errorf("client connection is nil")
+				log.Printf("ERROR: Client %s connection is nil", name)
+				errorsChan <- fmt.Errorf("client %s connection is nil", name)
 				return
 			}
 
-			if err := c.Conn.WriteJSON(msg); err != nil {
-				errorsChan <- fmt.Errorf("failed to write message to client: %v", err)
-				go room.RemoveClient(c)
-				return
+			msg.Time = time.Now()
+			msg.RoomID = room.ID
+
+			log.Printf("Sending message type - %s to %s", msg.Type, name)
+
+			done := make(chan error, 1)
+			go func() {
+				done <- c.Conn.WriteJSON(msg)
+			}()
+
+			select {
+			case err := <-done:
+				if err != nil {
+					log.Printf("ERROR sending to %s: %v", name, err)
+					errorsChan <- fmt.Errorf("failed to send to %s: %v", name, err)
+				} else {
+					log.Printf("Message sent successfully to %s", name)
+				}
+			case <-time.After(5 * time.Second):
+				log.Printf("ERROR: Timeout sending to %s", name)
+				errorsChan <- fmt.Errorf("timeout sending to %s", name)
 			}
-		}(client)
+		}(client, username)
+
+		//to avoid overwhelming the WebSocket connection
+		time.Sleep(10 * time.Millisecond)
 	}
 
-	go func() {
-		wg.Wait()
-		close(errorsChan)
-	}()
+	wg.Wait()
+	close(errorsChan)
 
 	var errList []error
 	for err := range errorsChan {
@@ -718,8 +715,51 @@ func (room *Room) BroadcastMessage(msg Message) {
 	}
 
 	if len(errList) > 0 {
-		log.Printf("Errors broadcasting message: %v", errList)
+		log.Printf("Broadcast errors: %v", errList)
+	} else {
+		log.Printf("Broadcast completed successfully - Message type %s ", msg.Type)
 	}
+}
+
+// handleTimeout processes the timeout message from the client
+func (room *Room) handleTimeout() {
+	room.mutex.Lock()
+
+	if room.Status != StatusInProgress {
+		log.Printf("Timeout called but game not in progress. Current status: %s", room.Status)
+		room.mutex.Unlock()
+		return
+	}
+
+	log.Printf("Game timeout processing - Room ID: %s", room.ID)
+
+	// Mark unfinished players
+	for username, client := range room.Clients {
+		client.mu.Lock()
+		if client.Stats.FinishTime == nil {
+			now := time.Now()
+			client.Stats.FinishTime = &now
+			client.Stats.Rank = room.NextRank
+			room.NextRank++
+			log.Printf("Timeout: Player %s marked with rank %d", username, client.Stats.Rank)
+		}
+		client.mu.Unlock()
+	}
+
+	room.Status = StatusFinished
+	room.mutex.Unlock()
+
+	timeoutMsg := Message{
+		Type: "game_timeout",
+		Data: map[string]interface{}{
+			"message": "Game time limit reached",
+			"status":  StatusFinished,
+		},
+	}
+
+	room.BroadcastMessage(timeoutMsg)
+
+	room.handleGameFinished()
 }
 
 // RemoveRoom removes a room from the room manager
