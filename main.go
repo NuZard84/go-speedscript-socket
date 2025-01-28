@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/NuZard84/go-socket-speedscript/db"
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/joho/godotenv"
 )
@@ -99,10 +100,11 @@ type Message struct {
 
 // RoomManager handles the creation and management of game rooms
 type RoomManager struct {
-	Rooms       map[string]*Room
-	mutex       sync.RWMutex
-	maxRooms    int
-	activeRooms int
+	Rooms        map[string]*Room
+	mutex        sync.RWMutex
+	maxRooms     int
+	activeRooms  int
+	waitingRooms []*Room
 }
 
 // Global variables for WebSocket and room management
@@ -133,8 +135,9 @@ func setTextFromDb() string {
 func NewRoomManager(maxRooms int) *RoomManager {
 	log.Printf("Creating new room manager with max rooms: %d", maxRooms)
 	return &RoomManager{
-		Rooms:    make(map[string]*Room),
-		maxRooms: maxRooms,
+		Rooms:        make(map[string]*Room),
+		maxRooms:     maxRooms,
+		waitingRooms: make([]*Room, 0),
 	}
 }
 
@@ -198,10 +201,9 @@ func main() {
 // handleWebSocket manages new WebSocket connections
 func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	username := r.URL.Query().Get("username")
-	roomID := r.URL.Query().Get("room_id")
 
-	if username == "" || roomID == "" {
-		http.Error(w, "Missing username or room_id", http.StatusBadRequest)
+	if username == "" {
+		http.Error(w, "Missing username", http.StatusBadRequest)
 		return
 	}
 
@@ -212,7 +214,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	client := NewClient(conn, username)
-	room := getOrCreateRoom(roomID)
+	room := roomManager.findOrCreateRoom()
 
 	if err := room.AddClient(client); err != nil {
 		log.Printf("Failed to add user to room: %v", err)
@@ -225,6 +227,13 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	go handleClientMessage(room, client)
+}
+
+// generate random roomIDs
+func generateRoomID() string {
+	uuidPart := uuid.New().String()[:8]
+	roomID := "room_0x" + uuidPart
+	return roomID
 }
 
 // handleClientMessage processes incoming messages from clients
@@ -774,22 +783,56 @@ func (rm *RoomManager) RemoveRoom(roomID string) {
 
 	delete(rm.Rooms, roomID)
 	rm.activeRooms--
+
+	// Remove from waitingRooms
+	for i, room := range rm.waitingRooms {
+		if room.ID == roomID {
+			rm.waitingRooms = append(rm.waitingRooms[:i], rm.waitingRooms[i+1:]...)
+			break
+		}
+	}
+
 	log.Printf("Room removed: %s, Active rooms: %d", roomID, rm.activeRooms)
 }
 
-// getOrCreateRoom retrieves an existing room or creates a new one
-func getOrCreateRoom(roomID string) *Room {
-	roomManager.mutex.Lock()
-	defer roomManager.mutex.Unlock()
+func (rm *RoomManager) findOrCreateRoom() *Room {
 
-	if room, ok := roomManager.Rooms[roomID]; ok {
-		log.Printf("Room already exists: %s", roomID)
-		return room
+	rm.mutex.Lock()
+	defer rm.mutex.Unlock()
+
+	//Check if any room have slots
+	for _, room := range rm.waitingRooms {
+		if len(room.Clients) < MaxmimumPlayers {
+			if room.Status == StatusWaiting {
+				return room
+			}
+		}
 	}
 
+	//If no slots are found, Create a new one
+	roomID := generateRoomID()
 	room := NewRoom(roomID)
-	roomManager.Rooms[roomID] = room
-	roomManager.activeRooms++
-	log.Printf("Created new room: %s", roomID)
+	rm.Rooms[roomID] = room
+	rm.waitingRooms = append(rm.waitingRooms, room)
+	rm.activeRooms++
+
 	return room
+
 }
+
+// getOrCreateRoom retrieves an existing room or creates a new one
+// func getOrCreateRoom(roomID string) *Room {
+// 	roomManager.mutex.Lock()
+// 	defer roomManager.mutex.Unlock()
+
+// 	if room, ok := roomManager.Rooms[roomID]; ok {
+// 		log.Printf("Room already exists: %s", roomID)
+// 		return room
+// 	}
+
+// 	room := NewRoom(roomID)
+// 	roomManager.Rooms[roomID] = room
+// 	roomManager.activeRooms++
+// 	log.Printf("Created new room: %s", roomID)
+// 	return room
+// }
