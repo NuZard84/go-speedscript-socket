@@ -596,6 +596,8 @@ func (room *Room) RemoveClient(client *Client) {
 
 	delete(room.Clients, client.Username)
 
+	go room.broadcastRoomState()
+
 	if len(room.Clients) < MinPlayersToStart && room.Status != StatusWaiting {
 		room.Status = StatusWaiting
 		room.StartTime = nil
