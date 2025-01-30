@@ -1,15 +1,20 @@
-
 package db
 
 import (
 	"context"
 	"time"
 
-	"github.com/NuZard84/go-socket-speedscript/models"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
+
+type TypingSentence struct {
+	Story           string `bson:"story"`
+	TotalCharacters int    `bson:"totalCharacters"`
+	TotalWords      int    `bson:"totalWords"`
+	Hash            string `bson:"hash"`
+}
 
 var client *mongo.Client
 
@@ -22,7 +27,7 @@ func Connect(uri string) error {
 	return err
 }
 
-func GetRandomSentence(ctx context.Context) (*models.TypingSentence, error) {
+func GetRandomSentence(ctx context.Context) (*TypingSentence, error) {
 	collection := client.Database("SpeedScript").Collection("typingsentences")
 
 	pipeline := mongo.Pipeline{
@@ -35,7 +40,7 @@ func GetRandomSentence(ctx context.Context) (*models.TypingSentence, error) {
 	}
 	defer cursor.Close(ctx)
 
-	var sentence models.TypingSentence
+	var sentence TypingSentence
 	if cursor.Next(ctx) {
 		if err := cursor.Decode(&sentence); err != nil {
 			return nil, err
