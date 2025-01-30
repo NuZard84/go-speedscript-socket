@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"math"
@@ -179,10 +180,29 @@ func init() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds | log.Lshortfile)
 }
 
+// Add this middleware function at the top level
+func enableCORS(handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Set CORS headers
+		w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
+		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+		// Handle preflight requests
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		handler(w, r)
+	}
+}
+
 // Main server function
 func main() {
 	http.HandleFunc("/ws/room", handleWebSocket)
-
+	http.HandleFunc("/api/create-room", enableCORS(handleCreateRoom))
+	http.HandleFunc("/api/check-room", enableCORS(handleCheckRoom))
 	port := ":8080"
 	log.Printf("Server starting on http://localhost%s", port)
 
@@ -201,6 +221,7 @@ func main() {
 // handleWebSocket manages new WebSocket connections
 func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	username := r.URL.Query().Get("username")
+	roomID := r.URL.Query().Get("room_id")
 
 	if username == "" {
 		http.Error(w, "Missing username", http.StatusBadRequest)
@@ -214,7 +235,24 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	client := NewClient(conn, username)
-	room := roomManager.FindOrCreateRoom()
+
+	var room *Room
+
+	if roomID != "" {
+		existingRoom, err := roomManager.GetRoom(roomID)
+		if err != nil {
+			conn.WriteJSON(Message{
+				Type: "error",
+				Data: "Room not found",
+			})
+			conn.Close()
+			return
+		}
+		room = existingRoom
+	} else {
+		room = roomManager.FindOrCreateRoom()
+
+	}
 
 	if err := room.AddClient(client); err != nil {
 		log.Printf("Failed to add user to room: %v", err)
@@ -838,3 +876,84 @@ func (rm *RoomManager) FindOrCreateRoom() *Room { //-done
 // 	log.Printf("Created new room: %s", roomID)
 // 	return room
 // }
+
+func (rm *RoomManager) CreateCustomRoom() *Room {
+	rm.Mutex.Lock()
+	defer rm.Mutex.Unlock()
+
+	roomID := generateRoomID()
+	room := NewRoom(roomID)
+	rm.Rooms[roomID] = room
+	rm.ActiveRooms++
+
+	log.Printf("Created custom room: %s", roomID)
+	return room
+}
+
+func (rm *RoomManager) GetRoom(RoomID string) (*Room, error) {
+
+	rm.Mutex.Lock()
+	defer rm.Mutex.Unlock()
+
+	room, exist := rm.Rooms[RoomID]
+	if !exist {
+		return nil, fmt.Errorf("room %s not found", RoomID)
+	}
+
+	return room, nil
+}
+
+//API for create and check a room
+
+func handleCreateRoom(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var reqBody map[string]interface{}
+	if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	username, _ := reqBody["username"].(string)
+
+	room := roomManager.CreateCustomRoom()
+
+	log.Printf("Room %s created by user: %s", room.ID, username)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"room_id": room.ID,
+		"status":  "created",
+	})
+}
+
+func handleCheckRoom(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	roomID := r.URL.Query().Get("room_id")
+	if roomID == "" {
+		http.Error(w, "Missing room_id", http.StatusBadRequest)
+		return
+	}
+
+	_, err := roomManager.GetRoom(roomID)
+	w.Header().Set("Content-Type", "application/json")
+
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]bool{
+			"exists": false,
+		})
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]bool{
+		"exists": true,
+	})
+
+}
