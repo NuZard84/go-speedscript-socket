@@ -1129,7 +1129,7 @@ func (room *Room) kickPlayer(targetUsername string, adminClient *Client) error {
 	}
 
 	kickMsg := Message{
-		Type: "kick_player",
+		Type: "you_are_kicked",
 		Data: map[string]interface{}{
 			"message": "You have been kicked from the room",
 			"by":      adminClient.Username,
