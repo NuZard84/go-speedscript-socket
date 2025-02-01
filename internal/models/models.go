@@ -36,5 +36,6 @@ type Message struct {
 	Data            interface{} `json:"data"`
 	Time            time.Time   `json:"timestamp"`
 	Text            string      `json:"text"`
+	RoomAdmin       string      `json:"room_admin"`
 	TotalCharacters int         `json:"totalCharacters,omitempty"`
 }

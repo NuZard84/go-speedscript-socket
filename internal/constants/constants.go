@@ -13,4 +13,7 @@ const (
 	MinPlayersToStart = 2
 	MaxmimumPlayers   = 4
 	CountdownDuration = 3 * time.Second
+
+	AdminActionKick           = "kick"
+	AdminActionUpdateCapacity = "update_capacity"
 )

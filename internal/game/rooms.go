@@ -19,22 +19,31 @@ type RoomManagerInterface interface {
 	RemoveRoom(roomID string)
 }
 
-var currentManager RoomManagerInterface
+var CurrentManager RoomManagerInterface
 
 func SetRoomManager(rm RoomManagerInterface) {
-	currentManager = rm
+	CurrentManager = rm
 }
 
 // Room represents a game room where multiple players compete
 type Room struct {
-	ID        string
-	Clients   map[string]*Client
-	Text      string
-	Status    string
-	StartTime *time.Time
-	NextRank  int
-	Mutex     sync.RWMutex
-	StatsChan chan models.FinalStatsMessage
+	ID            string
+	Clients       map[string]*Client
+	Text          string
+	Status        string
+	StartTime     *time.Time
+	NextRank      int
+	Mutex         sync.RWMutex
+	StatsChan     chan models.FinalStatsMessage
+	AdminUsername string
+	MaxCapacity   int
+}
+
+type AdminAction struct {
+	Action      string `json:"action"`
+	Target      string `json:"target"`
+	RoomID      string `json:"roomId"`
+	MaxCapacity int    `json:"maxCapacity,omitempty"`
 }
 
 func setTextFromDb() string {
@@ -49,16 +58,26 @@ func setTextFromDb() string {
 	return sentence.Story
 }
 
-func NewRoom(id string) *Room {
+func NewRoom(id string, adminUsername string, capacity int) *Room {
 	log.Printf("Creating new room: %s", id)
+
+	if adminUsername == "" {
+		log.Printf("Creating new room: %s with no admin ", id)
+	}
+	if capacity <= 0 {
+		capacity = constants.MaxmimumPlayers
+	}
+
 	text := setTextFromDb()
 
 	return &Room{
-		ID:        id,
-		Clients:   make(map[string]*Client),
-		Status:    constants.StatusWaiting,
-		Text:      text,
-		StatsChan: make(chan models.FinalStatsMessage, constants.MaxmimumPlayers), // Initialize the channel
+		ID:            id,
+		Clients:       make(map[string]*Client),
+		Status:        constants.StatusWaiting,
+		Text:          text,
+		StatsChan:     make(chan models.FinalStatsMessage, constants.MaxmimumPlayers), // Initialize the channel
+		AdminUsername: adminUsername,
+		MaxCapacity:   capacity,
 	}
 }
 
@@ -227,8 +246,8 @@ func (room *Room) AddClient(client *Client) error {
 		return fmt.Errorf("this username is already taken")
 	}
 
-	if len(room.Clients) == constants.MaxmimumPlayers {
-		return fmt.Errorf("room is full")
+	if len(room.Clients) >= room.MaxCapacity {
+		return fmt.Errorf("room has reached maximum capacity of %d players", room.MaxCapacity)
 	}
 
 	room.Clients[client.Username] = client
@@ -276,7 +295,7 @@ func (room *Room) RemoveClient(client *Client) {
 	}
 
 	if len(room.Clients) == 0 {
-		go currentManager.RemoveRoom(room.ID)
+		go CurrentManager.RemoveRoom(room.ID)
 	}
 }
 
@@ -359,12 +378,16 @@ func (room *Room) BroadcastRoomState() {
 		Text            string                  `json:"text,omitempty"`
 		StartTime       *time.Time              `json:"startTime,omitempty"`
 		TotalCharacters int                     `json:"totalCharacters"`
+		MaxCapacity     int                     `json:"maxCapacity"`
+		CurrentPlayers  int                     `json:"currentPlayers"`
 	}{
 		Status:          room.Status,
 		Players:         make(map[string]*PlayerStats),
 		Text:            room.Text,
 		StartTime:       room.StartTime,
 		TotalCharacters: textLength,
+		MaxCapacity:     room.MaxCapacity,
+		CurrentPlayers:  len(room.Clients),
 	}
 
 	for username, client := range room.Clients {
@@ -385,11 +408,12 @@ func (room *Room) BroadcastRoomState() {
 	room.Mutex.RUnlock()
 
 	room.BroadcastMessage(models.Message{
-		Type:   "room_state",
-		Data:   state,
-		Time:   time.Now(),
-		RoomID: room.ID,
-		Text:   room.Text,
+		Type:      "room_state",
+		Data:      state,
+		Time:      time.Now(),
+		RoomID:    room.ID,
+		RoomAdmin: room.AdminUsername,
+		Text:      room.Text,
 	})
 }
 
@@ -505,4 +529,144 @@ func (room *Room) ValidateAllPlayersReady() bool {
 	}
 
 	return true
+}
+
+// Add method to check if a user is admin
+func (room *Room) IsAdmin(username string) bool {
+	room.Mutex.Lock()
+	defer room.Mutex.Unlock()
+
+	return username == room.AdminUsername && room.AdminUsername != ""
+}
+
+// Add method to handle admin actions
+func (room *Room) HandleAdminAction(action AdminAction, client *Client) error {
+
+	if !room.IsAdmin(client.Username) {
+		return fmt.Errorf("unauthorized: only admin can perform this action")
+	}
+
+	var err error
+
+	switch action.Action {
+
+	case constants.AdminActionKick:
+		err = room.KickPlayer(action.Target, client)
+
+	case constants.AdminActionUpdateCapacity:
+		err = room.UpdateCapacity(action.MaxCapacity)
+
+	default:
+		err = fmt.Errorf("unknown admin action: %s", action.Action)
+	}
+
+	if err != nil {
+		// Send error message to client
+		errorMsg := models.Message{
+			Type: "error",
+			Data: err.Error(),
+		}
+		client.WriteMu.Lock()
+		client.Conn.WriteJSON(errorMsg)
+		client.WriteMu.Unlock()
+	}
+
+	return err
+}
+
+// update capacity
+func (room *Room) UpdateCapacity(newCapacity int) error {
+	room.Mutex.Lock()
+	defer room.Mutex.Unlock()
+
+	if newCapacity < len(room.Clients) {
+		return fmt.Errorf("cannot set capacity below current player count")
+	}
+
+	if newCapacity > 50 {
+		return fmt.Errorf("room capacity must be at least 50")
+	}
+
+	if newCapacity <= 0 {
+		return fmt.Errorf("invalid capacity value")
+	}
+
+	/* No messages are lost
+	No goroutines are left hanging
+	Only happens when room is waiting (safe state)
+	*/
+
+	if room.Status == constants.StatusWaiting {
+		// Safely close and recreate the channel
+		if room.StatsChan != nil {
+			// Drain the existing channel first
+			for len(room.StatsChan) > 0 {
+				<-room.StatsChan
+			}
+			close(room.StatsChan)
+		}
+		room.StatsChan = make(chan models.FinalStatsMessage, newCapacity)
+	}
+
+	room.MaxCapacity = newCapacity
+	log.Printf("Room %s capacity updated to %d", room.ID, room.MaxCapacity)
+
+	// Use a separate goroutine for broadcasting to prevent deadlock
+	go func() {
+		room.BroadcastMessage(models.Message{
+			Type: "room_capacity_updated",
+			Data: map[string]interface{}{
+				"maxCapacity": newCapacity,
+			},
+		})
+		room.BroadcastRoomState()
+	}()
+
+	return nil
+}
+
+// kick players
+func (room *Room) KickPlayer(targetUsername string, adminClient *Client) error {
+	room.Mutex.Lock()
+	defer room.Mutex.Unlock()
+
+	if targetUsername == room.AdminUsername {
+		return fmt.Errorf("cannot kick the admin")
+	}
+
+	targetClient, exists := room.Clients[targetUsername]
+	if !exists {
+		return fmt.Errorf("player %s not found in room", targetUsername)
+	}
+
+	kickMsg := models.Message{
+		Type: "kick_player",
+		Data: map[string]interface{}{
+			"message": "You have been kicked from the room",
+			"by":      adminClient.Username,
+		},
+	}
+
+	targetClient.WriteMu.Lock()
+	err := targetClient.Conn.WriteJSON(kickMsg)
+	defer targetClient.WriteMu.Unlock()
+
+	log.Printf("player %s has been kicked by admin %s", targetUsername, adminClient.Username)
+
+	if err != nil {
+		log.Printf("Error notifying kicked player: %v", err)
+	}
+
+	go room.RemoveClient(targetClient)
+	notifyMsg := models.Message{
+		Type: "player_kicked",
+		Data: map[string]interface{}{
+			"kicked_player": targetUsername,
+			"by_admin":      adminClient.Username,
+		},
+	}
+
+	go room.BroadcastMessage(notifyMsg)
+
+	return nil
 }

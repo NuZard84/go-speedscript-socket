@@ -36,6 +36,7 @@ func Init() {
 // handleWebSocket manages new WebSocket connections
 func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	username := r.URL.Query().Get("username")
+	roomID := r.URL.Query().Get("room_id")
 
 	if username == "" {
 		http.Error(w, "Missing username", http.StatusBadRequest)
@@ -49,7 +50,22 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	client := game.NewClient(conn, username)
-	room := RoomManager.FindOrCreateRoom()
+
+	var room *game.Room
+	if roomID != "" {
+		existingRoom, err := RoomManager.GetRoom(roomID)
+		if err != nil {
+			conn.WriteJSON(models.Message{
+				Type: "error",
+				Data: "Room not found",
+			})
+			conn.Close()
+			return
+		}
+		room = existingRoom
+	} else {
+		room = RoomManager.FindOrCreateRoom()
+	}
 
 	if err := room.AddClient(client); err != nil {
 		log.Printf("Failed to add user to room: %v", err)
@@ -82,6 +98,34 @@ func HandleClientMessage(room *game.Room, client *game.Client) {
 		msg.Time = time.Now()
 
 		switch msg.Type {
+		case "admin_action":
+			var adminAction game.AdminAction
+			if data, ok := msg.Data.(map[string]interface{}); ok {
+				action := data["action"].(string)
+				maxCap, _ := data["maxCapacity"].(float64)
+				if action == constants.AdminActionKick {
+					adminAction = game.AdminAction{
+						Action: data["action"].(string),
+						Target: data["target"].(string),
+						RoomID: data["room_id"].(string),
+					}
+				}
+				if action == constants.AdminActionUpdateCapacity {
+					adminAction = game.AdminAction{
+						Action:      data["action"].(string),
+						MaxCapacity: int(maxCap),
+						RoomID:      data["room_id"].(string),
+					}
+				}
+				if err := room.HandleAdminAction(adminAction, client); err != nil {
+					client.WriteMu.Lock()
+					client.Conn.WriteJSON(models.Message{
+						Type: "error",
+						Data: err.Error(),
+					})
+					client.WriteMu.Unlock()
+				}
+			}
 		case "ready":
 			handleReadyState(room, client, msg)
 		case "progress":

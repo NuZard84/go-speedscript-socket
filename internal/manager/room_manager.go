@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"fmt"
 	"log"
 	"sync"
 
@@ -75,7 +76,7 @@ func (rm *RoomManager) FindOrCreateRoom() *game.Room {
 
 	//If no slots are found, Create a new one
 	roomID := generateRoomID()
-	room := game.NewRoom(roomID)
+	room := game.NewRoom(roomID, "", constants.MaxmimumPlayers)
 	rm.Rooms[roomID] = room
 	rm.WaitingRooms = append(rm.WaitingRooms, room)
 	rm.ActiveRooms++
@@ -100,3 +101,26 @@ func (rm *RoomManager) FindOrCreateRoom() *game.Room {
 // 	log.Printf("Created new room: %s", roomID)
 // 	return room
 // }
+
+func (rm *RoomManager) GetRoom(RoomID string) (*game.Room, error) {
+	rm.Mutex.Lock()
+	defer rm.Mutex.Unlock()
+	room, exist := rm.Rooms[RoomID]
+	if !exist {
+		return nil, fmt.Errorf("room %s not found", RoomID)
+	}
+	return room, nil
+}
+
+func (rm *RoomManager) CreateCustomRoom(adminUsername string, capcity int) *game.Room {
+	rm.Mutex.Lock()
+	defer rm.Mutex.Unlock()
+
+	roomID := generateRoomID()
+	room := game.NewRoom(roomID, adminUsername, capcity)
+	rm.Rooms[roomID] = room
+	rm.ActiveRooms++
+	log.Printf("Created custom room: %s", roomID)
+
+	return room
+}

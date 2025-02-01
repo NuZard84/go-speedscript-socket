@@ -24,11 +24,31 @@ func init() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds | log.Lshortfile)
 }
 
+// middleware function at the top level
+func enableCORS(handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Set CORS headers
+		w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
+		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		// Handle preflight requests
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		handler(w, r)
+	}
+}
+
 // Main server function
 func main() {
 	handlers.Init()
 	game.SetRoomManager(handlers.RoomManager)
+
 	http.HandleFunc("/ws/room", handlers.HandleWebSocket)
+
+	http.HandleFunc("/api/create-room", enableCORS(handlers.HandleCreateRoom))
+	http.HandleFunc("/api/check-room", enableCORS(handlers.HandleCheckRoom))
 
 	port := ":8080"
 	log.Printf("Server starting on http://localhost%s", port)
