@@ -38,12 +38,18 @@ const (
 
 // Client represents a connected player with their connection and game stats
 type Client struct {
-	Conn     *websocket.Conn
-	Username string
-	Room     *Room
-	Stats    *PlayerStats
-	Mu       sync.RWMutex
-	WriteMu  sync.Mutex
+	Conn        *websocket.Conn
+	Username    string
+	Room        *Room
+	Stats       *PlayerStats
+	UserProfile UserProfile
+	Mu          sync.RWMutex
+	WriteMu     sync.Mutex
+}
+
+type UserProfile struct {
+	DailyHighestWpm int `bson:"dailyHighestWpm"`
+	HighestWpm      int `bson:"highestWpm"`
 }
 
 // PlayerStats tracks individual player performance during the game
@@ -145,6 +151,32 @@ func setTextFromDb() string { // -done
 	return sentence.Story
 }
 
+func setProfileFromDb(username string) *UserProfile {
+	ctx := context.Background()
+	userProfile, err := db.GetUserProfile(ctx, username)
+
+	if err != nil {
+		log.Printf("Error fetching User profile for %s: %v", username, err)
+		return &UserProfile{
+			DailyHighestWpm: 0,
+			HighestWpm:      0,
+		}
+	}
+
+	if userProfile == nil {
+		log.Printf("No profile found for user %s", username)
+		return &UserProfile{
+			DailyHighestWpm: 0,
+			HighestWpm:      0,
+		}
+	}
+
+	return &UserProfile{
+		DailyHighestWpm: userProfile.DailyHighestWpm,
+		HighestWpm:      userProfile.HighestWpm,
+	}
+}
+
 // NewRoomManager creates a new room manager instance - done
 func NewRoomManager(maxRooms int) *RoomManager {
 	log.Printf("Creating new room manager with max rooms: %d", maxRooms)
@@ -165,6 +197,7 @@ func NewClient(conn *websocket.Conn, username string) *Client {
 			CurrentPosition: 0,
 			WPM:             0,
 		},
+		UserProfile: *setProfileFromDb("hett84"),
 	}
 }
 

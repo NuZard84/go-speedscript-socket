@@ -16,6 +16,12 @@ type TypingSentence struct {
 	Hash            string `bson:"hash"`
 }
 
+type UserProfile struct {
+	Username        string `bson:"username"`
+	DailyHighestWpm int    `bson:"dailyHighestWpm"`
+	HighestWpm      int    `bson:"highestWpm"`
+}
+
 var client *mongo.Client
 
 func Connect(uri string) error {
@@ -48,4 +54,28 @@ func GetRandomSentence(ctx context.Context) (*TypingSentence, error) {
 		return &sentence, nil
 	}
 	return nil, mongo.ErrNoDocuments
+}
+
+func GetUserProfile(ctx context.Context, username string) (*UserProfile, error) {
+	collection := client.Database("SpeedScript").Collection("users")
+
+	var userProfile UserProfile
+
+	filter := bson.M{"username": username}
+
+	projection := bson.M{
+		"username":        1,
+		"dailyHighestWpm": 1,
+		"highestWpm":      1,
+	}
+
+	err := collection.FindOne(ctx, filter, options.FindOne().SetProjection(projection)).Decode(&userProfile)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	return &userProfile, nil
 }
