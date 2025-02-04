@@ -3,6 +3,8 @@ package handlers
 import (
 	"log"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/NuZard84/go-socket-speedscript/internal/constants"
@@ -10,30 +12,49 @@ import (
 	"github.com/NuZard84/go-socket-speedscript/internal/manager"
 	"github.com/NuZard84/go-socket-speedscript/internal/models"
 	"github.com/gorilla/websocket"
+	"github.com/joho/godotenv"
 )
 
-// VARIABLES =>
+// allowedOrigins reads a comma‑separated list of origins from the ALLOWED_ORIGINS
+// environment variable. If not set, it defaults to production and local URLs.
+var allowedOrigins = func() []string {
+	_ = godotenv.Load()
 
-// Configure WebSocket upgrader
+	origins := os.Getenv("ALLOWED_ORIGINS")
+
+	parts := strings.Split(origins, ",")
+	for i, part := range parts {
+		parts[i] = strings.TrimSpace(part)
+	}
+	return parts
+}()
+
+// Upgrader is configured for WebSocket connections.
+// The CheckOrigin function allows only requests from allowed origins.
 var Upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
 	CheckOrigin: func(r *http.Request) bool {
-		// TODO: In production, implement proper origin checking
-		return true
+		origin := r.Header.Get("Origin")
+		for _, o := range allowedOrigins {
+			if o == origin {
+				return true
+			}
+		}
+		log.Printf("Rejected WebSocket connection from origin: %s", origin)
+		return false
 	},
 }
 
-// Global room manager instance
+// RoomManager is the global instance for managing game rooms.
 var RoomManager *manager.RoomManager
 
+// Init initializes the RoomManager.
 func Init() {
 	RoomManager = manager.NewRoomManager(10)
 }
 
-// METHODS =>
-
-// handleWebSocket manages new WebSocket connections
+// HandleWebSocket upgrades HTTP connections to WebSockets and assigns clients to rooms.
 func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	username := r.URL.Query().Get("username")
 	roomID := r.URL.Query().Get("room_id")
@@ -50,8 +71,8 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	client := game.NewClient(conn, username)
-
 	var room *game.Room
+
 	if roomID != "" {
 		existingRoom, err := RoomManager.GetRoom(roomID)
 		if err != nil {
@@ -80,7 +101,7 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	go HandleClientMessage(room, client)
 }
 
-// handleClientMessage processes incoming messages from clients
+// HandleClientMessage reads messages from the WebSocket and handles them accordingly.
 func HandleClientMessage(room *game.Room, client *game.Client) {
 	defer room.RemoveClient(client)
 
@@ -141,7 +162,7 @@ func HandleClientMessage(room *game.Room, client *game.Client) {
 	}
 }
 
-// handleReadyState processes player ready status updates
+// handleReadyState processes the player's ready status.
 func handleReadyState(room *game.Room, client *game.Client, msg models.Message) {
 	readyState, ok := msg.Data.(bool)
 	if !ok {
@@ -160,7 +181,7 @@ func handleReadyState(room *game.Room, client *game.Client, msg models.Message) 
 	go room.BroadcastRoomState()
 }
 
-// handleProgress updates player progress during the game
+// handleProgress updates the player's progress during the game.
 func handleProgress(room *game.Room, client *game.Client, msg models.Message) {
 	room.Mutex.RLock()
 	if room.Status != constants.StatusInProgress {
@@ -187,7 +208,6 @@ func handleProgress(room *game.Room, client *game.Client, msg models.Message) {
 			client.Stats.WPM = w
 		}
 	}
-
 	isFinished := client.Stats.CurrentPosition >= totalChars
 	client.Mu.Unlock()
 
@@ -198,11 +218,10 @@ func handleProgress(room *game.Room, client *game.Client, msg models.Message) {
 	}
 }
 
-// handlePing responds to client ping messages
+// handlePing replies to ping messages from the client.
 func handlePing(client *game.Client) {
 	client.Mu.Lock()
 	defer client.Mu.Unlock()
-
 	client.Conn.WriteJSON(models.Message{
 		Type: "pong",
 		Data: time.Now(),
