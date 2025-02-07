@@ -36,6 +36,7 @@ func main() {
 	mux.HandleFunc("/ws/room", handlers.HandleWebSocket)
 	mux.HandleFunc("/api/create-room", handlers.EnableCORS(handlers.HandleCreateRoom))
 	mux.HandleFunc("/api/check-room", handlers.EnableCORS(handlers.HandleCheckRoom))
+	mux.HandleFunc("/api/test", handlers.EnableCORS(handlers.HandleTestAPI))
 
 	// Wrap the mux with security headers middleware.
 	handler := handlers.SecurityHeadersMiddleware(mux)
