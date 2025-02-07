@@ -15,21 +15,31 @@ import (
 	"github.com/joho/godotenv"
 )
 
-// init loads environment variables and connects to MongoDB.
 func init() {
-	_ = godotenv.Load() // Load .env file if running locally
+
+	_ = godotenv.Load()
 
 	mongoURI := os.Getenv("MONGO_URI")
 	if mongoURI == "" {
-		log.Fatal("MONGO_URI not set in environment variables")
+		log.Fatal("MONGO_URI is missing in environment variables")
 	}
 
-	if err := db.Connect(mongoURI); err != nil {
-		log.Fatalf("Could not connect to MongoDB: %v", err)
+	var err error
+	for i := 0; i < 3; i++ {
+		err = db.Connect(mongoURI)
+		if err == nil {
+			log.Println("✅ Connected to MongoDB successfully")
+			break
+		}
+		log.Printf("Failed to connect to MongoDB (attempt %d/3): %v", i+1, err)
+		time.Sleep(2 * time.Second)
+	}
+
+	if err != nil {
+		log.Fatalf("Could not establish MongoDB connection after 3 attempts: %v", err)
 	}
 
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds | log.Lshortfile)
-	log.Println("MongoDB connection established successfully")
 }
 
 func main() {
@@ -44,10 +54,16 @@ func main() {
 	mux.HandleFunc("/api/check-room", handlers.EnableCORS(handlers.HandleCheckRoom))
 	mux.HandleFunc("/api/test", handlers.EnableCORS(handlers.HandleTestAPI))
 
-	// Apply security headers middleware
+	// Health Check Endpoint
+	mux.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status": "ok"}`))
+	})
+
+	// Security headers middleware
 	handler := handlers.SecurityHeadersMiddleware(mux)
 
-	// Read port from environment
+	// PORT from environment
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
@@ -64,24 +80,25 @@ func main() {
 
 	// Start the server
 	go func() {
-		log.Printf("🚀 Server starting on port %s...", port)
+		log.Printf("🚀 Server is running on port %s...", port)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Server failed: %v", err)
+			log.Fatalf("Server startup failed: %v", err)
 		}
 	}()
 
-	// Graceful shutdown handling
+	// Handle Graceful Shutdown
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	<-stop
-	log.Println("🛑 Shutting down server...")
+	log.Println("🛑 Shutting down server gracefully...")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	// Context for clean shutdown
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	if err := server.Shutdown(ctx); err != nil {
 		log.Fatalf("Server shutdown failed: %v", err)
 	}
 
-	log.Println("✅ Server gracefully stopped")
+	log.Println("✅ Server has stopped cleanly")
 }
