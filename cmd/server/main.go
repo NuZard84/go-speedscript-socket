@@ -47,7 +47,7 @@ func main() {
 	// Apply security headers middleware
 	handler := handlers.SecurityHeadersMiddleware(mux)
 
-	// Read port from environment (default to 8080 for Azure)
+	// Read port from environment
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
