@@ -62,7 +62,7 @@ func main() {
 		IdleTimeout:  60 * time.Second,
 	}
 
-	// Start the server in a separate goroutine
+	// Start the server
 	go func() {
 		log.Printf("🚀 Server starting on port %s...", port)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -76,7 +76,6 @@ func main() {
 	<-stop
 	log.Println("🛑 Shutting down server...")
 
-	// Create a deadline for the graceful shutdown
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
