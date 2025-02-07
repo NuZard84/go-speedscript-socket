@@ -15,7 +15,16 @@ import (
 	"github.com/joho/godotenv"
 )
 
-// init loads the environment variables and connects to MongoDB.
+// Get public IP or default to 0.0.0.0
+func getPublicIP() string {
+	ip := os.Getenv("PUBLIC_IP") // Manually set in Azure if needed
+	if ip == "" {
+		ip = "0.0.0.0" // Default to all interfaces
+	}
+	return ip
+}
+
+// init loads environment variables and connects to MongoDB.
 func init() {
 	_ = godotenv.Load()
 
@@ -44,11 +53,10 @@ func main() {
 	// Read port from the environment (default to 8080).
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "8080"
+		port = "8080" // Default port
 	}
-	addr := ":" + port
 
-	// Create the HTTP server with sensible timeouts.
+	addr := "0.0.0.0:" + port
 	server := &http.Server{
 		Addr:         addr,
 		Handler:      handler,
@@ -59,7 +67,7 @@ func main() {
 
 	// Start the server in a goroutine.
 	go func() {
-		log.Printf("Server starting on http://localhost%s", addr)
+		log.Printf("Server starting on http://%s:%s", getPublicIP(), port)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Could not listen on %s: %v", addr, err)
 		}
