@@ -397,6 +397,7 @@ func (room *Room) BroadcastRoomState() {
 			CurrentPosition: client.Stats.CurrentPosition,
 			WPM:             math.Round(client.Stats.WPM*100) / 100,
 			Rank:            client.Stats.Rank,
+			HighestWpm:      client.UserProfile.HighestWpm,
 		}
 		if client.Stats.FinishTime != nil {
 			finishTime := *client.Stats.FinishTime

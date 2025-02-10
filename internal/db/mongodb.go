@@ -17,9 +17,8 @@ type TypingSentence struct {
 }
 
 type UserProfile struct {
-	Username        string `bson:"username"`
-	HighestWpm      int    `bson:"highestWpm"`
-	DailyHighestWpm int    `bson:"dailyHighestWpm"`
+	Username   string  `bson:"username"`
+	HighestWpm float64 `bson:"highestWpm"`
 }
 
 var client *mongo.Client
@@ -64,9 +63,8 @@ func GetUserProfile(ctx context.Context, username string) (*UserProfile, error) 
 	filter := bson.M{"username": username}
 
 	projection := bson.M{
-		"username":        1,
-		"dailyHighestWpm": 1,
-		"highestWpm":      1,
+		"username":   1,
+		"highestWpm": 1,
 	}
 
 	err := collection.FindOne(ctx, filter, options.FindOne().SetProjection(projection)).Decode(&userProfile)

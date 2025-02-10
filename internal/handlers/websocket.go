@@ -71,6 +71,8 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	client := game.NewClient(conn, username)
+	log.Printf("client %s 's highest wpm %v fetched", username, client.UserProfile.HighestWpm)
+
 	var room *game.Room
 
 	if roomID != "" {
