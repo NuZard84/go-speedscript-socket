@@ -48,8 +48,7 @@ type Client struct {
 }
 
 type UserProfile struct {
-	DailyHighestWpm int `bson:"dailyHighestWpm"`
-	HighestWpm      int `bson:"highestWpm"`
+	HighestWpm int `bson:"highestWpm"`
 }
 
 // PlayerStats tracks individual player performance during the game
@@ -59,6 +58,7 @@ type PlayerStats struct {
 	WPM             float64    `json:"wpm"`
 	FinishTime      *time.Time `json:"finishTime,omitempty"`
 	Rank            int        `json:"rank"`
+	HighestWpm      int        `json:"highestWpm"`
 }
 
 type PlayerTimeStats struct {
@@ -158,22 +158,19 @@ func setProfileFromDb(username string) *UserProfile {
 	if err != nil {
 		log.Printf("Error fetching User profile for %s: %v", username, err)
 		return &UserProfile{
-			DailyHighestWpm: 0,
-			HighestWpm:      0,
+			HighestWpm: 0,
 		}
 	}
 
 	if userProfile == nil {
 		log.Printf("No profile found for user %s", username)
 		return &UserProfile{
-			DailyHighestWpm: 0,
-			HighestWpm:      0,
+			HighestWpm: 0,
 		}
 	}
 
 	return &UserProfile{
-		DailyHighestWpm: userProfile.DailyHighestWpm,
-		HighestWpm:      userProfile.HighestWpm,
+		HighestWpm: userProfile.HighestWpm,
 	}
 }
 
@@ -291,6 +288,8 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	client := NewClient(conn, username)
+
+	log.Printf("clients highest wpm fetched: %v", client.UserProfile.HighestWpm)
 
 	var room *Room
 
@@ -774,6 +773,7 @@ func (room *Room) broadcastRoomState() {
 			CurrentPosition: client.Stats.CurrentPosition,
 			WPM:             math.Round(client.Stats.WPM*100) / 100,
 			Rank:            client.Stats.Rank,
+			HighestWpm:      client.UserProfile.HighestWpm,
 		}
 		if client.Stats.FinishTime != nil {
 			finishTime := *client.Stats.FinishTime
