@@ -51,7 +51,7 @@ var RoomManager *manager.RoomManager
 
 // Init initializes the RoomManager.
 func Init() {
-	RoomManager = manager.NewRoomManager(10)
+	RoomManager = manager.NewRoomManager(5000)
 }
 
 // HandleWebSocket upgrades HTTP connections to WebSockets and assigns clients to rooms.

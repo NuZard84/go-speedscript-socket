@@ -238,6 +238,8 @@ func (room *Room) AddClient(client *Client) error {
 	room.Mutex.Lock()
 	defer room.Mutex.Unlock()
 
+	room.Text = setTextFromDb()
+
 	if room.Status != constants.StatusWaiting {
 		return fmt.Errorf("this room is already in busy state")
 	}
