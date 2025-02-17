@@ -38,4 +38,5 @@ type Message struct {
 	Text            string      `json:"text"`
 	RoomAdmin       string      `json:"room_admin"`
 	TotalCharacters int         `json:"totalCharacters,omitempty"`
+	AdminRole       string      `json:"admin_role"`
 }

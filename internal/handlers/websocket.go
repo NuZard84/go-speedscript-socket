@@ -75,7 +75,7 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	var room *game.Room
 
 	if roomID != "" {
-		existingRoom, err := RoomManager.GetRoom(roomID)
+		existingRoom, err := RoomManager.GetRoom(roomID, true)
 		if err != nil {
 			conn.WriteJSON(models.Message{
 				Type: "error",
@@ -152,6 +152,14 @@ func HandleClientMessage(room *game.Room, client *game.Client) {
 			handleReadyState(room, client, msg)
 		case "progress":
 			handleProgress(room, client, msg)
+		case "wpm_update":
+			if data, ok := msg.Data.(map[string]interface{}); ok {
+				if wpmValue, ok := data["wpm"].(float64); ok {
+					if client.Room != nil {
+						client.Room.HandleClientWpmUpdate(client, wpmValue)
+					}
+				}
+			}
 		case "ping":
 			handlePing(client)
 		case "final_stats":

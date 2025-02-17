@@ -27,16 +27,18 @@ func SetRoomManager(rm RoomManagerInterface) {
 
 // Room represents a game room where multiple players compete
 type Room struct {
-	ID            string
-	Clients       map[string]*Client
-	Text          string
-	Status        string
-	StartTime     *time.Time
-	NextRank      int
-	Mutex         sync.RWMutex
-	StatsChan     chan models.FinalStatsMessage
-	AdminUsername string
-	MaxCapacity   int
+	ID                string
+	Clients           map[string]*Client
+	Text              string
+	Status            string
+	StartTime         *time.Time
+	NextRank          int
+	Mutex             sync.RWMutex
+	StatsChan         chan models.FinalStatsMessage
+	AdminRole         string
+	LastWpmUpdateTime time.Time
+	AdminUsername     string
+	MaxCapacity       int
 }
 
 type AdminAction struct {
@@ -71,13 +73,15 @@ func NewRoom(id string, adminUsername string, capacity int) *Room {
 	text := setTextFromDb()
 
 	return &Room{
-		ID:            id,
-		Clients:       make(map[string]*Client),
-		Status:        constants.StatusWaiting,
-		Text:          text,
-		StatsChan:     make(chan models.FinalStatsMessage, constants.MaxmimumPlayers), // Initialize the channel
-		AdminUsername: adminUsername,
-		MaxCapacity:   capacity,
+		ID:                id,
+		Clients:           make(map[string]*Client),
+		Status:            constants.StatusWaiting,
+		Text:              text,
+		StatsChan:         make(chan models.FinalStatsMessage, constants.MaxmimumPlayers),
+		AdminRole:         "spectator",
+		LastWpmUpdateTime: time.Now(),
+		AdminUsername:     adminUsername,
+		MaxCapacity:       capacity,
 	}
 }
 
@@ -394,18 +398,41 @@ func (room *Room) BroadcastRoomState() {
 
 	for username, client := range room.Clients {
 		client.Mu.RLock()
-		stats := &PlayerStats{
-			IsReady:         client.Stats.IsReady,
-			CurrentPosition: client.Stats.CurrentPosition,
-			WPM:             math.Round(client.Stats.WPM*100) / 100,
-			Rank:            client.Stats.Rank,
-			HighestWpm:      client.UserProfile.HighestWpm,
+
+		if room.AdminRole == "player" && room.Status == constants.StatusInProgress {
+			stats := &PlayerStats{
+
+				HighestWpm: client.UserProfile.HighestWpm,
+			}
+			if client.Stats.FinishTime != nil {
+				finishTime := *client.Stats.FinishTime
+				stats.FinishTime = &finishTime
+			}
+			state.Players[username] = stats
+		} else if room.AdminRole == "spectator" && room.Status == constants.StatusInProgress {
+			stats := &PlayerStats{
+
+				HighestWpm: client.UserProfile.HighestWpm,
+			}
+			if client.Stats.FinishTime != nil {
+				finishTime := *client.Stats.FinishTime
+				stats.FinishTime = &finishTime
+			}
+			state.Players[username] = stats
+		} else {
+			stats := &PlayerStats{
+				IsReady:         client.Stats.IsReady,
+				CurrentPosition: client.Stats.CurrentPosition,
+				WPM:             math.Round(client.Stats.WPM*100) / 100,
+				Rank:            client.Stats.Rank,
+				HighestWpm:      client.UserProfile.HighestWpm,
+			}
+			if client.Stats.FinishTime != nil {
+				finishTime := *client.Stats.FinishTime
+				stats.FinishTime = &finishTime
+			}
+			state.Players[username] = stats
 		}
-		if client.Stats.FinishTime != nil {
-			finishTime := *client.Stats.FinishTime
-			stats.FinishTime = &finishTime
-		}
-		state.Players[username] = stats
 		client.Mu.RUnlock()
 	}
 	room.Mutex.RUnlock()
@@ -416,6 +443,7 @@ func (room *Room) BroadcastRoomState() {
 		Time:      time.Now(),
 		RoomID:    room.ID,
 		RoomAdmin: room.AdminUsername,
+		AdminRole: room.AdminRole,
 		Text:      room.Text,
 	})
 }
@@ -448,56 +476,62 @@ func (room *Room) MergeAndBroadcastStats() {
 	// Create a map to store stats for each player
 	playerStatsMap := make(map[string]models.FinalPlayerStats)
 
-	// Wait for all clients to send their stats with a timeout
-	timeout := time.After(10 * time.Second) // 10-second timeout
-	for i := 0; i < len(room.Clients); i++ {
+	// Use a loop to wait for stats with a timeout
+	timeout := time.After(10 * time.Second)
+	statsReceived := 0
+	totalClients := len(room.Clients)
+	for statsReceived < totalClients {
 		select {
 		case statsMsg := <-room.StatsChan:
-			// Process stats
 			if stats, ok := statsMsg.Stats["stats"].(map[string]interface{}); ok {
 				playerStat := models.FinalPlayerStats{
 					Username: statsMsg.Username,
 					RoomID:   room.ID,
 				}
-
-				// Extract WPM and timeStats
-				if wpm, ok := stats["wpm"].(string); ok {
-					finalWPM, _ := strconv.ParseFloat(wpm, 64)
-					playerStat.FinalWPM = finalWPM
+				// Parse WPM safely
+				if wpmStr, ok := stats["wpm"].(string); ok {
+					if finalWPM, err := strconv.ParseFloat(wpmStr, 64); err == nil {
+						playerStat.FinalWPM = finalWPM
+					}
 				}
-
+				// Parse timeStats safely
 				if timeStats, ok := stats["timeStats"].([]interface{}); ok {
 					for _, stat := range timeStats {
 						if statMap, ok := stat.(map[string]interface{}); ok {
-							playerStat.Stats = append(playerStat.Stats, models.PlayerTimeStats{
-								Time: statMap["time"].(float64),
-								WPM:  statMap["wpm"].(float64),
-							})
+							timeVal, timeOk := statMap["time"].(float64)
+							wpmVal, wpmOk := statMap["wpm"].(float64)
+							if timeOk && wpmOk {
+								playerStat.Stats = append(playerStat.Stats, models.PlayerTimeStats{
+									Time: timeVal,
+									WPM:  wpmVal,
+								})
+							}
 						}
 					}
 				}
-
 				playerStatsMap[statsMsg.Username] = playerStat
 			}
+			statsReceived++
 		case <-timeout:
-			log.Printf("Timeout waiting for stats from clients")
-			return
+			log.Printf("Timeout reached waiting for stats; broadcasting partial stats")
+			// Break out of the loop to broadcast whatever we have
+			goto BroadcastStats
 		}
 	}
 
-	// Merge and broadcast stats
+BroadcastStats:
+	// Merge the gathered stats with client finish times
 	room.Mutex.RLock()
-	defer room.Mutex.RUnlock()
-
 	for _, client := range room.Clients {
 		client.Mu.RLock()
-		if stats, ok := playerStatsMap[client.Username]; ok {
+		if stats, ok := playerStatsMap[client.Username]; ok && client.Stats.FinishTime != nil {
 			stats.Rank = client.Stats.Rank
 			stats.FinishTime = client.Stats.FinishTime.Sub(*room.StartTime).Seconds()
 			allStats.Players = append(allStats.Players, stats)
 		}
 		client.Mu.RUnlock()
 	}
+	room.Mutex.RUnlock()
 
 	broadcastMsg := models.Message{
 		Type: "ws_final_stat",
@@ -509,7 +543,7 @@ func (room *Room) MergeAndBroadcastStats() {
 	}
 
 	room.BroadcastMessage(broadcastMsg)
-	log.Printf("Final stats broadcast completed successfully")
+	log.Printf("Final stats broadcast completed successfully (partial stats may have been broadcast)")
 }
 
 // VALIDATION
@@ -518,17 +552,25 @@ func (room *Room) ValidateAllPlayersReady() bool {
 	room.Mutex.RLock()
 	defer room.Mutex.RUnlock()
 
-	if len(room.Clients) < constants.MinPlayersToStart {
-		return false
-	}
-
-	for _, client := range room.Clients {
-		client.Mu.RLock()
-		if !client.Stats.IsReady {
-			client.Mu.RUnlock()
+	if room.AdminUsername != "" {
+		room.Clients[room.AdminUsername].Mu.RLock()
+		if !room.Clients[room.AdminUsername].Stats.IsReady {
+			room.Clients[room.AdminUsername].Mu.Unlock()
 			return false
 		}
-		client.Mu.RUnlock()
+	} else {
+		if len(room.Clients) < constants.MinPlayersToStart {
+			return false
+		}
+
+		for _, client := range room.Clients {
+			client.Mu.RLock()
+			if !client.Stats.IsReady {
+				client.Mu.RUnlock()
+				return false
+			}
+			client.Mu.RUnlock()
+		}
 	}
 
 	return true
@@ -587,7 +629,7 @@ func (room *Room) UpdateCapacity(newCapacity int) error {
 	}
 
 	if newCapacity > 50 {
-		return fmt.Errorf("room capacity must be at least 50")
+		return fmt.Errorf("room capacity cannot exceed 50 players")
 	}
 
 	if newCapacity <= 0 {
@@ -672,4 +714,63 @@ func (room *Room) KickPlayer(targetUsername string, adminClient *Client) error {
 	go room.BroadcastMessage(notifyMsg)
 
 	return nil
+}
+
+func (room *Room) SendWpmUpdatesToAdmin() {
+	room.Mutex.RLock()
+
+	if room.Status != constants.StatusInProgress || room.AdminUsername == "" || room.AdminRole != "spectator" {
+		room.Mutex.Unlock()
+		return
+	}
+
+	admin, exists := room.Clients[room.AdminUsername]
+	if !exists {
+		room.Mutex.Unlock()
+		return
+	}
+
+	playerWpmData := make(map[string]float64, len(room.Clients)-1)
+	for username, client := range room.Clients {
+		if username == room.AdminUsername {
+			continue
+		}
+
+		client.Mu.RLock()
+		playerWpmData[username] = client.Stats.WPM
+		client.Mu.RUnlock()
+	}
+
+	room.LastWpmUpdateTime = time.Now()
+	room.Mutex.RUnlock()
+
+	wpmUpdateMsg := models.Message{
+		Type: "admin_wpm_update",
+		Data: map[string]interface{}{
+			"playerWpmData": playerWpmData,
+			"timestamp":     time.Now(),
+		},
+	}
+
+	admin.WriteMu.Lock()
+	admin.Conn.WriteJSON(wpmUpdateMsg)
+	admin.WriteMu.Unlock()
+
+}
+
+func (room *Room) HandleClientWpmUpdate(client *Client, wpm float64) {
+
+	client.Mu.Lock()
+	client.Stats.WPM = wpm
+	client.Mu.Unlock()
+
+	room.Mutex.RLock()
+	isGameInProgress := room.Status == constants.StatusInProgress
+	isAdminSpectator := room.AdminRole == "spectator" && room.AdminUsername != ""
+	shouldUpdateAdmin := time.Since(room.LastWpmUpdateTime) > 1500*time.Millisecond
+	room.Mutex.RUnlock()
+
+	if isGameInProgress && isAdminSpectator && shouldUpdateAdmin {
+		go room.SendWpmUpdatesToAdmin()
+	}
 }

@@ -14,6 +14,7 @@ import (
 // RoomManager handles the creation and management of game rooms
 type RoomManager struct {
 	Rooms        map[string]*game.Room
+	PrivateRooms map[string]*game.Room
 	Mutex        sync.RWMutex
 	MaxRooms     int
 	ActiveRooms  int
@@ -26,38 +27,55 @@ func generateRoomID() string {
 	return roomID
 }
 
+func generatePrivateRoomID() string {
+	uuidPart := uuid.New().String()[:8]
+	roomID := "pr_room_0x" + uuidPart
+	return roomID
+}
+
 // NewRoomManager creates a new room manager instance
 func NewRoomManager(maxRooms int) *RoomManager {
 	log.Printf("Creating new room manager with max rooms: %d", maxRooms)
 	return &RoomManager{
 		Rooms:        make(map[string]*game.Room),
+		PrivateRooms: make(map[string]*game.Room),
 		MaxRooms:     maxRooms,
 		WaitingRooms: make([]*game.Room, 0),
 	}
 }
 
 // RemoveRoom removes a room from the room manager
-func (rm *RoomManager) RemoveRoom(roomID string) { //-done
+func (rm *RoomManager) RemoveRoom(roomID string) {
 	rm.Mutex.Lock()
 	defer rm.Mutex.Unlock()
 
-	if _, ok := rm.Rooms[roomID]; !ok {
-		log.Printf("Room does not exist!")
+	//  remove from public rooms.
+	if _, ok := rm.Rooms[roomID]; ok {
+		delete(rm.Rooms, roomID)
+		rm.ActiveRooms--
+		rm.removeFromWaitingRooms(roomID)
+		log.Printf("Public room removed: %s, Active rooms: %d", roomID, rm.ActiveRooms)
 		return
 	}
 
-	delete(rm.Rooms, roomID)
-	rm.ActiveRooms--
+	//  remove from private rooms.
+	if _, ok := rm.PrivateRooms[roomID]; ok {
+		delete(rm.PrivateRooms, roomID)
+		rm.ActiveRooms--
+		log.Printf("Private room removed: %s, Active rooms: %d", roomID, rm.ActiveRooms)
+		return
+	}
 
-	// Remove from waitingRooms
+	log.Printf("Room %s does not exist!", roomID)
+}
+
+func (rm *RoomManager) removeFromWaitingRooms(roomID string) {
 	for i, room := range rm.WaitingRooms {
 		if room.ID == roomID {
 			rm.WaitingRooms = append(rm.WaitingRooms[:i], rm.WaitingRooms[i+1:]...)
 			break
 		}
 	}
-
-	log.Printf("Room removed: %s, Active rooms: %d", roomID, rm.ActiveRooms)
 }
 
 func (rm *RoomManager) FindOrCreateRoom() *game.Room {
@@ -102,25 +120,34 @@ func (rm *RoomManager) FindOrCreateRoom() *game.Room {
 // 	return room
 // }
 
-func (rm *RoomManager) GetRoom(RoomID string) (*game.Room, error) {
+func (rm *RoomManager) GetRoom(RoomID string, isCustom bool) (*game.Room, error) {
 	rm.Mutex.Lock()
 	defer rm.Mutex.Unlock()
-	room, exist := rm.Rooms[RoomID]
-	if !exist {
-		return nil, fmt.Errorf("room %s not found", RoomID)
+
+	if isCustom {
+		room, exist := rm.PrivateRooms[RoomID]
+		if !exist {
+			return nil, fmt.Errorf("private room %s not found", RoomID)
+		}
+		return room, nil
+	} else {
+		room, exist := rm.Rooms[RoomID]
+		if !exist {
+			return nil, fmt.Errorf("room %s not found", RoomID)
+		}
+		return room, nil
 	}
-	return room, nil
 }
 
 func (rm *RoomManager) CreateCustomRoom(adminUsername string, capcity int) *game.Room {
 	rm.Mutex.Lock()
 	defer rm.Mutex.Unlock()
 
-	roomID := generateRoomID()
+	roomID := generatePrivateRoomID()
 	room := game.NewRoom(roomID, adminUsername, capcity)
-	rm.Rooms[roomID] = room
+	rm.PrivateRooms[roomID] = room
 	rm.ActiveRooms++
-	log.Printf("Created custom room: %s", roomID)
+	log.Printf("Created custom private room: %s", roomID)
 
 	return room
 }
