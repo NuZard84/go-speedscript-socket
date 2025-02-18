@@ -444,7 +444,6 @@ func (room *Room) BroadcastRoomState() {
 		RoomID:    room.ID,
 		RoomAdmin: room.AdminUsername,
 		AdminRole: room.AdminRole,
-		Text:      room.Text,
 	})
 }
 
@@ -718,15 +717,16 @@ func (room *Room) KickPlayer(targetUsername string, adminClient *Client) error {
 
 func (room *Room) SendWpmUpdatesToAdmin() {
 	room.Mutex.RLock()
+	defer room.Mutex.RUnlock()
 
-	if room.Status != constants.StatusInProgress || room.AdminUsername == "" || room.AdminRole != "spectator" {
-		room.Mutex.Unlock()
+	if room.Status != constants.StatusInProgress ||
+		room.AdminUsername == "" ||
+		room.AdminRole != "spectator" {
 		return
 	}
 
 	admin, exists := room.Clients[room.AdminUsername]
 	if !exists {
-		room.Mutex.Unlock()
 		return
 	}
 
@@ -735,27 +735,34 @@ func (room *Room) SendWpmUpdatesToAdmin() {
 		if username == room.AdminUsername {
 			continue
 		}
-
 		client.Mu.RLock()
 		playerWpmData[username] = client.Stats.WPM
 		client.Mu.RUnlock()
 	}
 
 	room.LastWpmUpdateTime = time.Now()
-	room.Mutex.RUnlock()
+
+	playerWpmList := make([]map[string]interface{}, 0, len(playerWpmData))
+	for username, wpm := range playerWpmData {
+		playerWpmList = append(playerWpmList, map[string]interface{}{
+			"username": username,
+			"wpm":      wpm,
+		})
+	}
 
 	wpmUpdateMsg := models.Message{
 		Type: "admin_wpm_update",
 		Data: map[string]interface{}{
-			"playerWpmData": playerWpmData,
+			// Use the list array here
+			"playerWpmData": playerWpmList,
 			"timestamp":     time.Now(),
 		},
 	}
 
 	admin.WriteMu.Lock()
-	admin.Conn.WriteJSON(wpmUpdateMsg)
-	admin.WriteMu.Unlock()
+	defer admin.WriteMu.Unlock()
 
+	admin.Conn.WriteJSON(wpmUpdateMsg)
 }
 
 func (room *Room) HandleClientWpmUpdate(client *Client, wpm float64) {
