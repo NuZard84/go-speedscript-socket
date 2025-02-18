@@ -553,8 +553,8 @@ func (room *Room) ValidateAllPlayersReady() bool {
 
 	if room.AdminUsername != "" {
 		room.Clients[room.AdminUsername].Mu.RLock()
+		defer room.Clients[room.AdminUsername].Mu.RUnlock()
 		if !room.Clients[room.AdminUsername].Stats.IsReady {
-			room.Clients[room.AdminUsername].Mu.Unlock()
 			return false
 		}
 	} else {
