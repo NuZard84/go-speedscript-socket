@@ -34,9 +34,9 @@ func EnableCORS(next http.HandlerFunc) http.HandlerFunc {
 			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 		} else {
 			// Optionally, return a 403 if you want to block explicitly:
-			// http.Error(w, "Forbidden", http.StatusForbidden)
-			// return
-			//
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+
 			// Or do nothing and let it fail in the browser due to missing CORS headers.
 		}
 
