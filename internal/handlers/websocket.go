@@ -122,6 +122,9 @@ func handleResetState(room *game.Room, client *game.Client) {
 		return
 	}
 
+	client.Conn.WriteJSON(models.Message{
+		Type: "reseted_room",
+	})
 	room.BroadcastRoomState()
 }
 
