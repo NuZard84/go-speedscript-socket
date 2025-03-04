@@ -786,19 +786,15 @@ func (room *Room) HandleResetRoomState() error {
 	room.Mutex.Lock()
 	defer room.Mutex.Unlock()
 
-
 	if room.Status != constants.StatusFinished {
 		return fmt.Errorf("cannot reset; the game is not finished yet")
 	}
-
 
 	room.Status = constants.StatusWaiting
 	room.StartTime = nil
 	room.NextRank = 1
 
-	/
 	room.Text = setTextFromDb()
-
 
 	for _, client := range room.Clients {
 		client.Mu.Lock()
@@ -809,12 +805,10 @@ func (room *Room) HandleResetRoomState() error {
 			FinishTime:      nil,
 			Rank:            0,
 			HighestWpm:      client.UserProfile.HighestWpm,
-		
 		}
 		client.Mu.Unlock()
 	}
 
-	
 	if room.StatsChan != nil {
 		close(room.StatsChan)
 	}
