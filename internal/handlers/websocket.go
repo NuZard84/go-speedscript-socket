@@ -114,7 +114,7 @@ func handleResetState(room *game.Room, client *game.Client) {
 
 	if err := room.HandleResetRoomState(); err != nil {
 		log.Printf("Error resetting room state: %v", err)
-		// Optionally notify the user
+
 		client.Conn.WriteJSON(models.Message{
 			Type: "error",
 			Data: err.Error(),
@@ -122,7 +122,6 @@ func handleResetState(room *game.Room, client *game.Client) {
 		return
 	}
 
-	// If successful, broadcast the new room state
 	room.BroadcastRoomState()
 }
 

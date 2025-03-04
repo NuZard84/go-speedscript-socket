@@ -786,20 +786,20 @@ func (room *Room) HandleResetRoomState() error {
 	room.Mutex.Lock()
 	defer room.Mutex.Unlock()
 
-	// Allow reset only if the game has finished (or other condition you want)
+
 	if room.Status != constants.StatusFinished {
 		return fmt.Errorf("cannot reset; the game is not finished yet")
 	}
 
-	// Re-initialize the room’s status and timing
+
 	room.Status = constants.StatusWaiting
 	room.StartTime = nil
 	room.NextRank = 1
 
-	// Optionally fetch a new text from the DB, so players can have a fresh prompt
+	/
 	room.Text = setTextFromDb()
 
-	// Clear every player's stats for a new start
+
 	for _, client := range room.Clients {
 		client.Mu.Lock()
 		client.Stats = &PlayerStats{
@@ -809,13 +809,12 @@ func (room *Room) HandleResetRoomState() error {
 			FinishTime:      nil,
 			Rank:            0,
 			HighestWpm:      client.UserProfile.HighestWpm,
-			// Keep their personal best.
-			// If you want to wipe that too, you can just set it to 0.
+		
 		}
 		client.Mu.Unlock()
 	}
 
-	// Clean up and recreate the StatsChan so we’re fresh
+	
 	if room.StatsChan != nil {
 		close(room.StatsChan)
 	}
