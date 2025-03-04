@@ -12,6 +12,7 @@ import (
 	"github.com/NuZard84/go-socket-speedscript/internal/db"
 	"github.com/NuZard84/go-socket-speedscript/internal/game"
 	"github.com/NuZard84/go-socket-speedscript/internal/handlers"
+	"github.com/NuZard84/go-socket-speedscript/internal/models"
 	"github.com/joho/godotenv"
 )
 
@@ -60,7 +61,7 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"status": "ok"}`))
 	})
-
+	go GlobalOnlineBroadcaster()
 	// Security headers middleware
 	handler := handlers.SecurityHeadersMiddleware(mux)
 
@@ -102,4 +103,41 @@ func main() {
 	}
 
 	log.Println("✅ Server has stopped cleanly")
+}
+
+// GlobalOnlineBroadcaster periodically sends the total online user count every 30 seconds.
+func GlobalOnlineBroadcaster() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		<-ticker.C
+		// Calculate the global online user count
+		onlineCount := GetGlobalOnlineCount()
+
+		// Create the message payload
+		message := models.Message{
+			Type: "global_online",
+			Data: onlineCount, // an integer representing the total users online
+			Time: time.Now(),
+		}
+
+		// Broadcast the message to every room
+		// Assuming RoomManager.Rooms is a map of room IDs to room objects.
+		for _, room := range handlers.RoomManager.Rooms {
+			go room.BroadcastMessage(message)
+		}
+		log.Printf("Broadcasted global online count: %d", onlineCount)
+	}
+}
+
+// GetGlobalOnlineCount iterates through all rooms and sums up the total users.
+func GetGlobalOnlineCount() int {
+	total := 0
+	for _, room := range handlers.RoomManager.Rooms {
+		room.Mutex.RLock()
+		total += len(room.Clients)
+		room.Mutex.RUnlock()
+	}
+	return total
 }
