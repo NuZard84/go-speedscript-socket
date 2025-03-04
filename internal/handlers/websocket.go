@@ -102,6 +102,30 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	go HandleClientMessage(room, client)
 }
 
+func handleResetState(room *game.Room, client *game.Client) {
+	// OPTIONAL: If you want only the admin to reset, do something like:
+	// if !room.IsAdmin(client.Username) {
+	//     client.Conn.WriteJSON(models.Message{
+	//         Type: "error",
+	//         Data: "Only admin can reset the room",
+	//     })
+	//     return
+	// }
+
+	if err := room.HandleResetRoomState(); err != nil {
+		log.Printf("Error resetting room state: %v", err)
+		// Optionally notify the user
+		client.Conn.WriteJSON(models.Message{
+			Type: "error",
+			Data: err.Error(),
+		})
+		return
+	}
+
+	// If successful, broadcast the new room state
+	room.BroadcastRoomState()
+}
+
 // HandleClientMessage reads messages from the WebSocket and handles them accordingly.
 func HandleClientMessage(room *game.Room, client *game.Client) {
 	defer room.RemoveClient(client)
@@ -162,6 +186,8 @@ func HandleClientMessage(room *game.Room, client *game.Client) {
 			}
 		case "ping":
 			handlePing(client)
+		case "reset_state":
+			handleResetState(room, client)
 		case "final_stats":
 			log.Printf("Received final_stats message: %+v", msg)
 			room.HandleFinalStats(client, msg)
