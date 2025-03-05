@@ -93,7 +93,7 @@ func (room *Room) StartGame() {
 	room.Status = constants.StatusCountdown
 	room.Mutex.Unlock()
 
-	for i := 3; i > 0; i-- {
+	for i := 10; i > 0; i-- {
 		room.BroadcastMessage(models.Message{
 			Type: "countdown",
 			Data: i,
