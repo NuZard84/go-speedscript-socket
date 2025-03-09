@@ -5,14 +5,22 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/NuZard84/go-socket-speedscript/internal/constants"
 	"github.com/NuZard84/go-socket-speedscript/internal/game"
 	"github.com/NuZard84/go-socket-speedscript/internal/manager"
 	"github.com/NuZard84/go-socket-speedscript/internal/models"
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/joho/godotenv"
+)
+
+// Global variables
+var (
+	globalClients   = make(map[*game.Client]bool) // Track all global online clients
+	globalClientsMu sync.RWMutex                  // Mutex to protect globalClients
 )
 
 // allowedOrigins reads a comma‑separated list of origins from the ALLOWED_ORIGINS
@@ -102,7 +110,17 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	go HandleClientMessage(room, client)
 }
 
+//dummy client
+
+func NewDummyClient(conn *websocket.Conn, username string) *game.Client {
+	return &game.Client{
+		Conn:     conn,
+		Username: username,
+	}
+}
+
 // HandleGlobalOnlineWebSocket upgrades HTTP connections to WebSockets for global online count.
+
 func HandleGlobalOnlineWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := Upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -111,27 +129,42 @@ func HandleGlobalOnlineWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create a new client without a username or room
-	client := game.NewClient(conn, "")
+	client := NewDummyClient(conn, uuid.NewString())
+
+	// Add the client to the globalClients map
+	globalClientsMu.Lock()
+	globalClients[client] = true
+	globalClientsMu.Unlock()
 
 	// Start a goroutine to handle sending the global online count
 	go HandleGlobalOnlineClient(client)
 }
 
 // HandleGlobalOnlineClient sends the global online count to the client periodically.
-func HandleGlobalOnlineClient(client *game.Client) {
-	defer client.Conn.Close()
 
-	ticker := time.NewTicker(30 * time.Second)
+func HandleGlobalOnlineClient(client *game.Client) {
+	defer func() {
+		// Remove the client from the globalClients map when they disconnect
+		globalClientsMu.Lock()
+		delete(globalClients, client)
+		globalClientsMu.Unlock()
+
+		client.Conn.Close()
+	}()
+
+	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
 	for range ticker.C {
-		// Calculate the global online count of competing users
-		onlineCount := GetGlobalCompetingCount()
+		// Calculate the global online count of all connected clients
+		globalClientsMu.RLock()
+		onlineCount := len(globalClients)
+		globalClientsMu.RUnlock()
 
 		// Create the message payload
 		message := models.Message{
 			Type: "global_online",
-			Data: onlineCount, // an integer representing the total users competing
+			Data: onlineCount, // an integer representing the total users connected
 			Time: time.Now(),
 		}
 
@@ -147,18 +180,6 @@ func HandleGlobalOnlineClient(client *game.Client) {
 	}
 }
 
-// GetGlobalCompetingCount iterates through all rooms and sums up the total users who are competing.
-func GetGlobalCompetingCount() int {
-	total := 0
-	for _, room := range RoomManager.Rooms {
-		room.Mutex.RLock()
-		if room.Status == constants.StatusInProgress {
-			total += len(room.Clients)
-		}
-		room.Mutex.RUnlock()
-	}
-	return total
-}
 func handleResetState(room *game.Room, client *game.Client) {
 	// OPTIONAL: If you want only the admin to reset, do something like:
 	// if !room.IsAdmin(client.Username) {
