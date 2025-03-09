@@ -61,13 +61,22 @@ func setProfileFromDb(username string) *UserProfile {
 // NewClient creates a new client instance with initialized stats
 func NewClient(conn *websocket.Conn, username string) *Client {
 	log.Printf("New client connected: %s", username)
-	return &Client{
-		Conn:     conn,
-		Username: username,
-		Stats: &PlayerStats{
-			CurrentPosition: 0,
-			WPM:             0,
-		},
-		UserProfile: *setProfileFromDb(username),
+
+	if username == "player" {
+		return &Client{
+			Conn:     conn,
+			Username: username,
+		}
+	} else {
+		return &Client{
+			Conn:     conn,
+			Username: username,
+			Stats: &PlayerStats{
+				CurrentPosition: 0,
+				WPM:             0,
+			},
+			UserProfile: *setProfileFromDb(username),
+		}
 	}
+
 }

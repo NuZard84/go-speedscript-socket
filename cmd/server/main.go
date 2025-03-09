@@ -51,6 +51,7 @@ func main() {
 	// Set up the HTTP routes
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws/room", handlers.HandleWebSocket)
+	mux.HandleFunc("/ws/global-online", handlers.HandleGlobalOnlineWebSocket)
 	mux.HandleFunc("/api/create-room", handlers.EnableCORS(handlers.HandleCreateRoom))
 	mux.HandleFunc("/api/check-room", handlers.EnableCORS(handlers.HandleCheckRoom))
 	mux.HandleFunc("/api/admin/change-role", handlers.EnableCORS(handlers.HandleAdminRoleChange))

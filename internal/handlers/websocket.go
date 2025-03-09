@@ -102,6 +102,63 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	go HandleClientMessage(room, client)
 }
 
+// HandleGlobalOnlineWebSocket upgrades HTTP connections to WebSockets for global online count.
+func HandleGlobalOnlineWebSocket(w http.ResponseWriter, r *http.Request) {
+	conn, err := Upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("WebSocket upgrade error: %v", err)
+		return
+	}
+
+	// Create a new client without a username or room
+	client := game.NewClient(conn, "")
+
+	// Start a goroutine to handle sending the global online count
+	go HandleGlobalOnlineClient(client)
+}
+
+// HandleGlobalOnlineClient sends the global online count to the client periodically.
+func HandleGlobalOnlineClient(client *game.Client) {
+	defer client.Conn.Close()
+
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		// Calculate the global online count of competing users
+		onlineCount := GetGlobalCompetingCount()
+
+		// Create the message payload
+		message := models.Message{
+			Type: "global_online",
+			Data: onlineCount, // an integer representing the total users competing
+			Time: time.Now(),
+		}
+
+		// Send the message to the client
+		client.WriteMu.Lock()
+		err := client.Conn.WriteJSON(message)
+		client.WriteMu.Unlock()
+
+		if err != nil {
+			log.Printf("Error sending global online count to client: %v", err)
+			return
+		}
+	}
+}
+
+// GetGlobalCompetingCount iterates through all rooms and sums up the total users who are competing.
+func GetGlobalCompetingCount() int {
+	total := 0
+	for _, room := range RoomManager.Rooms {
+		room.Mutex.RLock()
+		if room.Status == constants.StatusInProgress {
+			total += len(room.Clients)
+		}
+		room.Mutex.RUnlock()
+	}
+	return total
+}
 func handleResetState(room *game.Room, client *game.Client) {
 	// OPTIONAL: If you want only the admin to reset, do something like:
 	// if !room.IsAdmin(client.Username) {
