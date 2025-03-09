@@ -419,20 +419,20 @@ func (room *Room) BroadcastRoomState() {
 				stats.FinishTime = &finishTime
 			}
 			state.Players[username] = stats
-		} else {
-			stats := &PlayerStats{
-				IsReady:         client.Stats.IsReady,
-				CurrentPosition: client.Stats.CurrentPosition,
-				WPM:             math.Round(client.Stats.WPM*100) / 100,
-				Rank:            client.Stats.Rank,
-				HighestWpm:      client.UserProfile.HighestWpm,
-			}
-			if client.Stats.FinishTime != nil {
-				finishTime := *client.Stats.FinishTime
-				stats.FinishTime = &finishTime
-			}
-			state.Players[username] = stats
 		}
+		stats := &PlayerStats{
+			IsReady:         client.Stats.IsReady,
+			CurrentPosition: client.Stats.CurrentPosition,
+			WPM:             math.Round(client.Stats.WPM*100) / 100,
+			Rank:            client.Stats.Rank,
+			HighestWpm:      client.UserProfile.HighestWpm,
+		}
+		if client.Stats.FinishTime != nil {
+			finishTime := *client.Stats.FinishTime
+			stats.FinishTime = &finishTime
+		}
+		state.Players[username] = stats
+
 		client.Mu.RUnlock()
 	}
 	room.Mutex.RUnlock()
