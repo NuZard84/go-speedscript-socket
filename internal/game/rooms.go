@@ -780,6 +780,7 @@ func (room *Room) HandleClientWpmUpdate(client *Client, wpm float64) {
 	if isGameInProgress && isAdminSpectator && shouldUpdateAdmin {
 		go room.SendWpmUpdatesToAdmin()
 	}
+
 }
 
 func (room *Room) HandleResetRoomState() error {

@@ -58,13 +58,18 @@ func GetRandomSentence(ctx context.Context) (*TypingSentence, error) {
 func GetUserProfile(ctx context.Context, username string) (*UserProfile, error) {
 	collection := client.Database("SpeedScript").Collection("users")
 
-	var userProfile UserProfile
+	var userProfile struct {
+		Username   string `bson:"username"`
+		HighestWpm struct {
+			HighestScore30s float64 `bson:"highestScore30s"`
+		} `bson:"highestWpm"`
+	}
 
 	filter := bson.M{"username": username}
 
 	projection := bson.M{
-		"username":   1,
-		"highestWpm": 1,
+		"username":                   1,
+		"highestWpm.highestScore30s": 1,
 	}
 
 	err := collection.FindOne(ctx, filter, options.FindOne().SetProjection(projection)).Decode(&userProfile)
@@ -75,5 +80,8 @@ func GetUserProfile(ctx context.Context, username string) (*UserProfile, error) 
 		return nil, err
 	}
 
-	return &userProfile, nil
+	return &UserProfile{
+		Username:   userProfile.Username,
+		HighestWpm: userProfile.HighestWpm.HighestScore30s,
+	}, nil
 }
