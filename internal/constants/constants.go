@@ -16,4 +16,5 @@ const (
 
 	AdminActionKick           = "kick"
 	AdminActionUpdateCapacity = "update_capacity"
+	AdminActionUpdateTimeout  = "update_timeout"
 )

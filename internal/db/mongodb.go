@@ -17,8 +17,13 @@ type TypingSentence struct {
 }
 
 type UserProfile struct {
-	Username   string  `bson:"username"`
-	HighestWpm float64 `bson:"highestWpm"`
+	Username   string `bson:"username"`
+	HighestWpm struct {
+		HighestScore10s  float64 `bson:"highestScore10s"`
+		HighestScore30s  float64 `bson:"highestScore30s"`
+		HighestScore60s  float64 `bson:"highestScore60s"`
+		HighestScore120s float64 `bson:"highestScore120s"`
+	} `bson:"highestWpm"`
 }
 
 var client *mongo.Client
@@ -61,15 +66,18 @@ func GetUserProfile(ctx context.Context, username string) (*UserProfile, error) 
 	var userProfile struct {
 		Username   string `bson:"username"`
 		HighestWpm struct {
-			HighestScore30s float64 `bson:"highestScore30s"`
+			HighestScore10s  float64 `bson:"highestScore10s"`
+			HighestScore30s  float64 `bson:"highestScore30s"`
+			HighestScore60s  float64 `bson:"highestScore60s"`
+			HighestScore120s float64 `bson:"highestScore120s"`
 		} `bson:"highestWpm"`
 	}
 
 	filter := bson.M{"username": username}
 
 	projection := bson.M{
-		"username":                   1,
-		"highestWpm.highestScore30s": 1,
+		"username":   1,
+		"highestWpm": 1,
 	}
 
 	err := collection.FindOne(ctx, filter, options.FindOne().SetProjection(projection)).Decode(&userProfile)
@@ -81,7 +89,17 @@ func GetUserProfile(ctx context.Context, username string) (*UserProfile, error) 
 	}
 
 	return &UserProfile{
-		Username:   userProfile.Username,
-		HighestWpm: userProfile.HighestWpm.HighestScore30s,
+		Username: userProfile.Username,
+		HighestWpm: struct {
+			HighestScore10s  float64 `bson:"highestScore10s"`
+			HighestScore30s  float64 `bson:"highestScore30s"`
+			HighestScore60s  float64 `bson:"highestScore60s"`
+			HighestScore120s float64 `bson:"highestScore120s"`
+		}{
+			HighestScore10s:  userProfile.HighestWpm.HighestScore10s,
+			HighestScore30s:  userProfile.HighestWpm.HighestScore30s,
+			HighestScore60s:  userProfile.HighestWpm.HighestScore60s,
+			HighestScore120s: userProfile.HighestWpm.HighestScore120s,
+		},
 	}, nil
 }

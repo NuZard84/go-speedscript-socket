@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
 
 	"github.com/NuZard84/go-socket-speedscript/internal/constants"
 	"github.com/NuZard84/go-socket-speedscript/internal/db"
+	"github.com/containerd/console"
 
 	"github.com/NuZard84/go-socket-speedscript/internal/models"
 )
@@ -39,13 +41,15 @@ type Room struct {
 	LastWpmUpdateTime time.Time
 	AdminUsername     string
 	MaxCapacity       int
+	TimeoutDuration   int // Duration in seconds
 }
 
 type AdminAction struct {
-	Action      string `json:"action"`
-	Target      string `json:"target"`
-	RoomID      string `json:"roomId"`
-	MaxCapacity int    `json:"maxCapacity,omitempty"`
+	Action      string      `json:"action"`
+	Target      string      `json:"target"`
+	RoomID      string      `json:"roomId"`
+	MaxCapacity int         `json:"maxCapacity,omitempty"`
+	Data        interface{} `json:"data,omitempty"`
 }
 
 func setTextFromDb() string {
@@ -82,6 +86,7 @@ func NewRoom(id string, adminUsername string, capacity int) *Room {
 		LastWpmUpdateTime: time.Now(),
 		AdminUsername:     adminUsername,
 		MaxCapacity:       capacity,
+		TimeoutDuration:   30, // Default timeout for competitive rooms
 	}
 }
 
@@ -167,6 +172,7 @@ func (room *Room) HandleClientFinish(client *Client) {
 			"time":          now.Sub(*room.StartTime).Seconds(),
 			"username":      client.Username,
 			"finalPosition": currentPos,
+			"duration":      room.TimeoutDuration,
 		},
 	}
 
@@ -225,8 +231,9 @@ func (room *Room) HandleTimeout() {
 	timeoutMsg := models.Message{
 		Type: "game_timeout",
 		Data: map[string]interface{}{
-			"message": "Game time limit reached",
-			"status":  constants.StatusFinished,
+			"message":  "Game time limit reached",
+			"status":   constants.StatusFinished,
+			"duration": room.TimeoutDuration,
 		},
 	}
 
@@ -386,6 +393,7 @@ func (room *Room) BroadcastRoomState() {
 		TotalCharacters int                     `json:"totalCharacters"`
 		MaxCapacity     int                     `json:"maxCapacity"`
 		CurrentPlayers  int                     `json:"currentPlayers"`
+		TimeoutDuration int                     `json:"timeoutDuration"`
 	}{
 		Status:          room.Status,
 		Players:         make(map[string]*PlayerStats),
@@ -394,32 +402,11 @@ func (room *Room) BroadcastRoomState() {
 		TotalCharacters: textLength,
 		MaxCapacity:     room.MaxCapacity,
 		CurrentPlayers:  len(room.Clients),
+		TimeoutDuration: room.TimeoutDuration,
 	}
 
 	for username, client := range room.Clients {
 		client.Mu.RLock()
-
-		if room.AdminRole == "player" && room.Status == constants.StatusInProgress {
-			stats := &PlayerStats{
-
-				HighestWpm: client.UserProfile.HighestWpm,
-			}
-			if client.Stats.FinishTime != nil {
-				finishTime := *client.Stats.FinishTime
-				stats.FinishTime = &finishTime
-			}
-			state.Players[username] = stats
-		} else if room.AdminRole == "spectator" && room.Status == constants.StatusInProgress {
-			stats := &PlayerStats{
-
-				HighestWpm: client.UserProfile.HighestWpm,
-			}
-			if client.Stats.FinishTime != nil {
-				finishTime := *client.Stats.FinishTime
-				stats.FinishTime = &finishTime
-			}
-			state.Players[username] = stats
-		}
 		stats := &PlayerStats{
 			IsReady:         client.Stats.IsReady,
 			CurrentPosition: client.Stats.CurrentPosition,
@@ -432,7 +419,6 @@ func (room *Room) BroadcastRoomState() {
 			stats.FinishTime = &finishTime
 		}
 		state.Players[username] = stats
-
 		client.Mu.RUnlock()
 	}
 	room.Mutex.RUnlock()
@@ -585,7 +571,6 @@ func (room *Room) IsAdmin(username string) bool {
 
 // Add method to handle admin actions
 func (room *Room) HandleAdminAction(action AdminAction, client *Client) error {
-
 	if !room.IsAdmin(client.Username) {
 		return fmt.Errorf("unauthorized: only admin can perform this action")
 	}
@@ -593,13 +578,16 @@ func (room *Room) HandleAdminAction(action AdminAction, client *Client) error {
 	var err error
 
 	switch action.Action {
-
 	case constants.AdminActionKick:
 		err = room.KickPlayer(action.Target, client)
-
 	case constants.AdminActionUpdateCapacity:
 		err = room.UpdateCapacity(action.MaxCapacity)
-
+	case constants.AdminActionUpdateTimeout:
+		if duration, ok := action.Data.(float64); ok {
+			err = room.UpdateTimeout(int(duration))
+		} else {
+			err = fmt.Errorf("invalid timeout duration")
+		}
 	default:
 		err = fmt.Errorf("unknown admin action: %s", action.Action)
 	}
@@ -742,6 +730,50 @@ func (room *Room) SendWpmUpdatesToAdmin() {
 
 	room.LastWpmUpdateTime = time.Now()
 
+	// Create a slice of player data for sorting
+	type playerData struct {
+		username string
+		wpm      float64
+	}
+	players := make([]playerData, 0, len(playerWpmData))
+	for username, wpm := range playerWpmData {
+		players = append(players, playerData{username, wpm})
+	}
+
+	// Sort players by WPM in descending order
+	sort.Slice(players, func(i, j int) bool {
+		return players[i].wpm > players[j].wpm
+	})
+
+	// Create rank map for quick lookup
+	rankMap := make(map[string]int)
+	for i, player := range players {
+		rankMap[player.username] = i + 1
+	}
+
+	// Send rank updates to individual players
+	for username, client := range room.Clients {
+		if username == room.AdminUsername {
+			continue
+		}
+		fmt.Println("ranking send to ", username)
+		if rank, exists := rankMap[username]; exists {
+			rankUpdateMsg := models.Message{
+				Type: "player_rank_update",
+				Data: map[string]interface{}{
+					"rank":         rank,
+					"totalPlayers": len(players),
+					"timestamp":    time.Now(),
+				},
+			}
+
+			client.WriteMu.Lock()
+			client.Conn.WriteJSON(rankUpdateMsg)
+			client.WriteMu.Unlock()
+		}
+	}
+
+	// Send WPM updates to admin
 	playerWpmList := make([]map[string]interface{}, 0, len(playerWpmData))
 	for username, wpm := range playerWpmData {
 		playerWpmList = append(playerWpmList, map[string]interface{}{
@@ -753,7 +785,6 @@ func (room *Room) SendWpmUpdatesToAdmin() {
 	wpmUpdateMsg := models.Message{
 		Type: "admin_wpm_update",
 		Data: map[string]interface{}{
-			// Use the list array here
 			"playerWpmData": playerWpmList,
 			"timestamp":     time.Now(),
 		},
@@ -816,5 +847,42 @@ func (room *Room) HandleResetRoomState() error {
 	room.StatsChan = make(chan models.FinalStatsMessage, room.MaxCapacity)
 
 	log.Printf("Room %s successfully reset to waiting state", room.ID)
+	return nil
+}
+
+// update timeout duration
+func (room *Room) UpdateTimeout(newDuration int) error {
+	room.Mutex.Lock()
+	defer room.Mutex.Unlock()
+
+	// Validate duration
+	validDurations := []int{10, 30, 60, 120}
+	isValid := false
+	for _, duration := range validDurations {
+		if newDuration == duration {
+			isValid = true
+			break
+		}
+	}
+
+	if !isValid {
+		return fmt.Errorf("invalid timeout duration. Must be one of: 10, 30, 60, 120 seconds")
+	}
+
+	if room.Status != constants.StatusWaiting {
+		return fmt.Errorf("cannot change timeout while game is in progress")
+	}
+
+	room.TimeoutDuration = newDuration
+	log.Printf("Room %s timeout updated to %d seconds", room.ID, room.TimeoutDuration)
+
+	// Broadcast the timeout update to all clients in the room
+	go room.BroadcastMessage(models.Message{
+		Type: "timeout_updated",
+		Data: map[string]interface{}{
+			"duration": newDuration,
+		},
+	})
+
 	return nil
 }
