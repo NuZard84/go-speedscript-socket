@@ -12,7 +12,6 @@ import (
 
 	"github.com/NuZard84/go-socket-speedscript/internal/constants"
 	"github.com/NuZard84/go-socket-speedscript/internal/db"
-	"github.com/containerd/console"
 
 	"github.com/NuZard84/go-socket-speedscript/internal/models"
 )
