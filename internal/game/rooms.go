@@ -614,8 +614,8 @@ func (room *Room) UpdateCapacity(newCapacity int) error {
 		return fmt.Errorf("cannot set capacity below current player count")
 	}
 
-	if newCapacity > 50 {
-		return fmt.Errorf("room capacity cannot exceed 50 players")
+	if newCapacity > 200 {
+		return fmt.Errorf("room capacity cannot exceed 200 players")
 	}
 
 	if newCapacity <= 0 {

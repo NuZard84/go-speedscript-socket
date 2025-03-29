@@ -147,7 +147,7 @@ func (rm *RoomManager) CreateCustomRoom(adminUsername string, capcity int) *game
 	room := game.NewRoom(roomID, adminUsername, capcity)
 	rm.PrivateRooms[roomID] = room
 	rm.ActiveRooms++
-	log.Printf("Created custom private room: %s", roomID)
+	log.Printf("Created custom private room: %s With capacity: %d", roomID, capcity)
 
 	return room
 }
